@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: apilens
+      POSTGRES_PASSWORD: apilens_password
+      POSTGRES_DB: apilens_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apilens -d apilens_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  control-plane-api:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.api
+    ports:
+      - "3001:3001"
+    environment:
+      - DATABASE_URL=postgresql://apilens:apilens_password@postgres:5432/apilens_db
+      - REDIS_URL=redis://redis:6379
+      - PORT=3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  realtime-gateway:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.gateway
+    ports:
+      - "3002:3002"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3002
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  demo-api-server:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.demo-api
+    ports:
+      - "4001:4001"
+    environment:
+      - PORT=4001
+      - APILENS_REPORTER_URL=http://control-plane-api:3001
+    depends_on:
+      - control-plane-api
+
+  demo-nextjs-app:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.demo-nextjs
+    ports:
+      - "3000:3000"
+    environment:
+      - APILENS_ENABLED=true
+      - APILENS_REPORTER_URL=http://control-plane-api:3001
+    depends_on:
+      - demo-api-server
+      - control-plane-api
+
+volumes:
+  postgres_data:

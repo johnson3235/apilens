@@ -1,0 +1,26 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+RUN npm install -g pnpm
+
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/shared-types/package.json ./packages/shared-types/
+COPY apps/control-plane-api/package.json ./apps/control-plane-api/
+
+RUN pnpm install --filter @apilens/shared-types --filter @apilens/control-plane-api
+
+COPY packages/shared-types ./packages/shared-types
+COPY apps/control-plane-api ./apps/control-plane-api
+
+RUN pnpm --filter @apilens/shared-types build
+RUN pnpm --filter @apilens/control-plane-api build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+COPY --from=builder /app/apps/control-plane-api/dist ./dist
+COPY --from=builder /app/apps/control-plane-api/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+
+EXPOSE 3001
+CMD ["node", "dist/index.js"]

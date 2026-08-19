@@ -1,0 +1,26 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+RUN npm install -g pnpm
+
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/shared-types/package.json ./packages/shared-types/
+COPY apps/realtime-gateway/package.json ./apps/realtime-gateway/
+
+RUN pnpm install --filter @apilens/shared-types --filter @apilens/realtime-gateway
+
+COPY packages/shared-types ./packages/shared-types
+COPY apps/realtime-gateway ./apps/realtime-gateway
+
+RUN pnpm --filter @apilens/shared-types build
+RUN pnpm --filter @apilens/realtime-gateway build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+COPY --from=builder /app/apps/realtime-gateway/dist ./dist
+COPY --from=builder /app/apps/realtime-gateway/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+
+EXPOSE 3002
+CMD ["node", "dist/index.js"]

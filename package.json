@@ -1,0 +1,23 @@
+{
+  "name": "apilens",
+  "private": true,
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "test:integration": "turbo run test:integration",
+    "test:e2e": "turbo run test:e2e",
+    "lint": "turbo run lint",
+    "format": "turbo run format",
+    "clean": "turbo run clean"
+  },
+  "devDependencies": {
+    "typescript": "~5.5.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.5",
+    "turbo": "^1.13.2",
+    "vitest": "^1.6.0",
+    "@types/node": "^20.12.7"
+  },
+  "packageManager": "pnpm@9.15.9"
+}

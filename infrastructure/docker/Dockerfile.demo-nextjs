@@ -1,0 +1,31 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+RUN npm install -g pnpm
+
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/shared-types/package.json ./packages/shared-types/
+COPY sdks/node/package.json ./sdks/node/
+COPY examples/demo-nextjs-app/package.json ./examples/demo-nextjs-app/
+
+RUN pnpm install --filter @apilens/demo-nextjs-app...
+
+COPY packages/shared-types ./packages/shared-types
+COPY sdks/node ./sdks/node
+COPY examples/demo-nextjs-app ./examples/demo-nextjs-app
+
+RUN pnpm --filter @apilens/shared-types build
+RUN pnpm --filter @apilens/node-sdk build
+RUN pnpm --filter @apilens/demo-nextjs-app build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV production
+ENV PORT 3000
+
+COPY --from=builder /app/examples/demo-nextjs-app/next.config.js ./
+COPY --from=builder /app/examples/demo-nextjs-app/.next/standalone ./
+COPY --from=builder /app/examples/demo-nextjs-app/.next/static ./.next/static
+
+EXPOSE 3000
+CMD ["node", "examples/demo-nextjs-app/server.js"]

@@ -1,0 +1,29 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+RUN npm install -g pnpm
+
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/shared-types/package.json ./packages/shared-types/
+COPY sdks/node/package.json ./sdks/node/
+COPY examples/demo-api-server/package.json ./examples/demo-api-server/
+
+RUN pnpm install --filter @apilens/shared-types --filter @apilens/node-sdk --filter @apilens/demo-api-server
+
+COPY packages/shared-types ./packages/shared-types
+COPY sdks/node ./sdks/node
+COPY examples/demo-api-server ./examples/demo-api-server
+
+RUN pnpm --filter @apilens/shared-types build
+RUN pnpm --filter @apilens/node-sdk build
+RUN pnpm --filter @apilens/demo-api-server build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+COPY --from=builder /app/examples/demo-api-server/dist ./dist
+COPY --from=builder /app/examples/demo-api-server/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+
+EXPOSE 4001
+CMD ["node", "dist/index.js"]
