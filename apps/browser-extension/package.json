@@ -1,12 +1,20 @@
 {
   "name": "@apilens/browser-extension",
-  "version": "0.1.0",
+  "version": "0.6.1",
   "private": true,
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:build": "node scripts/verify-build.mjs",
+    "build:firefox": "pnpm build && node scripts/prepare-firefox.mjs",
+    "verify:firefox": "node scripts/verify-firefox-build.mjs",
+    "build:safari": "pnpm build && node scripts/prepare-safari.mjs",
+    "verify:safari": "node scripts/verify-safari-build.mjs",
+    "check": "pnpm test && pnpm build && pnpm verify:build",
+    "check:all": "pnpm check && pnpm build:firefox && pnpm verify:firefox && pnpm build:safari && pnpm verify:safari"
   },
   "dependencies": {
     "@apilens/rule-engine": "workspace:*",

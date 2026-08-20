@@ -1,6 +1,5 @@
-import { Rule } from '@apilens/shared-types/rule';
-import { Scenario } from '@apilens/shared-types/scenario';
-import { Session } from '@apilens/shared-types/session';
+import type { Rule, Scenario, Session } from '@apilens/shared-types';
+import { extensionApi } from './browser-api';
 
 const STORAGE_KEYS = {
   RULES: 'apilens_rules',
@@ -9,34 +8,34 @@ const STORAGE_KEYS = {
 };
 
 export async function saveRules(rules: Rule[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.RULES]: rules });
+  await extensionApi.storage.local.set({ [STORAGE_KEYS.RULES]: rules });
 }
 
 export async function loadRules(): Promise<Rule[]> {
-  const data = await chrome.storage.local.get(STORAGE_KEYS.RULES);
+  const data = await extensionApi.storage.local.get(STORAGE_KEYS.RULES);
   return data[STORAGE_KEYS.RULES] || [];
 }
 
 export async function saveScenarios(scenarios: Scenario[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.SCENARIOS]: scenarios });
+  await extensionApi.storage.local.set({ [STORAGE_KEYS.SCENARIOS]: scenarios });
 }
 
 export async function loadScenarios(): Promise<Scenario[]> {
-  const data = await chrome.storage.local.get(STORAGE_KEYS.SCENARIOS);
+  const data = await extensionApi.storage.local.get(STORAGE_KEYS.SCENARIOS);
   return data[STORAGE_KEYS.SCENARIOS] || [];
 }
 
 export async function saveSession(session: Session): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.SESSION]: session });
+  await extensionApi.storage.local.set({ [STORAGE_KEYS.SESSION]: session });
 }
 
 export async function loadSession(): Promise<Session | null> {
-  const data = await chrome.storage.local.get(STORAGE_KEYS.SESSION);
+  const data = await extensionApi.storage.local.get(STORAGE_KEYS.SESSION);
   return data[STORAGE_KEYS.SESSION] || null;
 }
 
 export async function clearAll(): Promise<void> {
-  await chrome.storage.local.clear();
+  await extensionApi.storage.local.clear();
 }
 
 // Export Rules to JSON file on local disk

@@ -50,4 +50,37 @@ describe('apiLensMiddleware', () => {
     expect(next).toHaveBeenCalled();
     expect(res.setHeader).not.toHaveBeenCalled();
   });
+
+  it('returns the configured mock response before the route handler', async () => {
+    const rules = [{
+      id: 'rule-1', scenarioId: 'test', name: '503 payment', description: '', enabled: true,
+      priority: 1, conditions: [{ field: 'path', operator: 'contains', value: '/payments' }],
+      conditionLogic: 'and', action: { type: 'status-code', statusCode: 503, responseBody: '{"error":"mocked"}' },
+      applyMode: 'always', appliedCount: 0, createdAt: 1, updatedAt: 1
+    }];
+    const middleware = apiLensMiddleware({ serviceName: 'payments' });
+    const req = {
+      headers: {
+        host: 'localhost:4001',
+        'x-qa-session-id': 'test-session',
+        'x-apilens-rules': Buffer.from(JSON.stringify(rules)).toString('base64')
+      },
+      method: 'POST', protocol: 'http', path: '/api/payments', originalUrl: '/api/payments',
+      hostname: 'localhost', query: {}, body: {}
+    } as any;
+    const send = vi.fn();
+    const status = vi.fn(() => ({ send }));
+    const res = {
+      setHeader: vi.fn(), hasHeader: vi.fn(() => false), on: vi.fn(), status
+    } as any;
+    const next = vi.fn();
+
+    await middleware(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(503);
+    expect(send).toHaveBeenCalledWith('{"error":"mocked"}');
+    expect(res.setHeader).toHaveBeenCalledWith('X-ApiLens-Mocked', 'true');
+    expect(res.setHeader).toHaveBeenCalledWith('X-ApiLens-Transport', 'server-sdk');
+  });
 });

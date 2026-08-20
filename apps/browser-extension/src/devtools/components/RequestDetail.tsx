@@ -26,7 +26,7 @@ export const RequestDetail: React.FC<RequestDetailProps> = ({ request, onClose, 
     const har = {
       log: {
         version: "1.2",
-        creator: { name: "ApiLens", version: "1.0" },
+        creator: { name: "ApiLens", version: "0.3.0" },
         entries: [{
           startedDateTime: new Date(request.startedAt).toISOString(),
           time: request.durationMs || 0,
@@ -46,7 +46,13 @@ export const RequestDetail: React.FC<RequestDetailProps> = ({ request, onClose, 
             content: { mimeType: "application/json", text: request.responseBody }
           },
           cache: {},
-          timings: { send: 0, wait: request.durationMs || 0, receive: 0 }
+          timings: { send: 0, wait: request.durationMs || 0, receive: 0 },
+          _apilens: {
+            mocked: Boolean(request.scenarioApplied),
+            rule: request.scenarioApplied,
+            source: request.source,
+            clientSide: request.isClientSide
+          }
         }]
       }
     };
@@ -68,7 +74,8 @@ export const RequestDetail: React.FC<RequestDetailProps> = ({ request, onClose, 
       {request.scenarioApplied && (
         <div style={{ padding: 12 }}>
           <div className="scenario-banner">
-            ⚡ Response was mocked by scenario: {request.scenarioApplied}
+            <strong>⚡ MOCKED FROM APILENS</strong><br />
+            Rule: {request.scenarioApplied}
           </div>
         </div>
       )}
@@ -114,6 +121,9 @@ export const RequestDetail: React.FC<RequestDetailProps> = ({ request, onClose, 
               <h5>General</h5>
               <div className="key-value"><div className="key">Status</div><div className="value"><span className={`status-badge status-${request.statusCode && request.statusCode < 400 ? 'green' : 'red'}`}>{request.statusCode || '-'}</span></div></div>
               <div className="key-value"><div className="key">Duration</div><div className="value">{request.durationMs ? `${request.durationMs}ms` : '-'}</div></div>
+              {request.scenarioApplied && <div className="key-value"><div className="key">Delivery</div><div className="value">Synthetic response returned directly to the application</div></div>}
+              {request.responseHeaders?.['x-apilens-transport'] && <div className="key-value"><div className="key">Interceptor</div><div className="value">{request.responseHeaders['x-apilens-transport']}</div></div>}
+              {request.responseHeaders?.['x-apilens-original-status'] && <div className="key-value"><div className="key">Original Status</div><div className="value">{request.responseHeaders['x-apilens-original-status']}</div></div>}
             </div>
 
             <div className="detail-section">

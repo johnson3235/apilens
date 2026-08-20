@@ -1,3 +1,5 @@
+import { extensionApi } from './browser-api';
+
 export interface KeywordFilter {
   id: string;
   keyword: string;
@@ -17,7 +19,7 @@ const DEFAULT_KEYWORDS: KeywordFilter[] = [
 
 export async function loadSavedKeywords(): Promise<KeywordFilter[]> {
   try {
-    const data = await chrome.storage.local.get(STORAGE_KEY);
+    const data = await extensionApi.storage.local.get(STORAGE_KEY);
     if (data[STORAGE_KEY] && Array.isArray(data[STORAGE_KEY])) {
       return data[STORAGE_KEY];
     }
@@ -29,7 +31,7 @@ export async function loadSavedKeywords(): Promise<KeywordFilter[]> {
 
 export async function saveSavedKeywords(keywords: KeywordFilter[]): Promise<void> {
   try {
-    await chrome.storage.local.set({ [STORAGE_KEY]: keywords });
+    await extensionApi.storage.local.set({ [STORAGE_KEY]: keywords });
   } catch (e) {
     console.error('Error saving keywords:', e);
   }

@@ -3,6 +3,21 @@ import { v4 as uuidv4 } from 'uuid';
 import { runWithContext, TraceContext } from './context';
 import { TraceReporter } from './trace-reporter';
 import { TraceSpan, SpanSource } from '@apilens/shared-types';
+import type { CapturedRequest, Rule } from '@apilens/shared-types';
+import { RuleExecutor, RuleMatcher } from '@apilens/rule-engine';
+
+const ruleMatcher = new RuleMatcher();
+const ruleExecutor = new RuleExecutor();
+
+function decodeRules(value: string | undefined): Rule[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64').toString('utf8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
 
 export interface MiddlewareOptions {
   serviceName: string;
@@ -14,7 +29,7 @@ export function apiLensMiddleware(options: MiddlewareOptions) {
   const enabled = options.enabled !== false;
   const reporter = new TraceReporter(options.reporterUrl);
 
-  return function (req: Request, res: Response, next: NextFunction) {
+  return async function (req: Request, res: Response, next: NextFunction) {
     if (!enabled) {
       return next();
     }
@@ -25,6 +40,7 @@ export function apiLensMiddleware(options: MiddlewareOptions) {
     }
 
     const scenarioId = req.headers['x-test-scenario-id'] as string | undefined;
+    const rules = decodeRules(req.headers['x-apilens-rules'] as string | undefined);
     const traceparent = req.headers['traceparent'] as string | undefined;
     
     let traceId = uuidv4().replace(/-/g, '');
@@ -52,31 +68,69 @@ export function apiLensMiddleware(options: MiddlewareOptions) {
     if (scenarioId) res.setHeader('x-test-scenario-id', scenarioId);
     res.setHeader('traceparent', newTraceparent);
 
-    runWithContext({ sessionId, scenarioId, traceContext }, () => {
+    const requestForRules = {
+      url: `${req.protocol || 'http'}://${typeof req.get === 'function' ? req.get('host') : (req.headers.host || 'localhost')}${req.originalUrl || req.url || '/'}`,
+      path: req.path || req.url || '/',
+      hostname: req.hostname || req.headers.host || 'localhost',
+      method: req.method,
+      queryParams: req.query,
+      requestHeaders: req.headers,
+      requestBody: req.body ? JSON.stringify(req.body) : null,
+      serviceName: options.serviceName,
+      statusCode: null
+    } as unknown as CapturedRequest;
+    const match = ruleMatcher.findMatchingRule(rules, requestForRules);
+
+    runWithContext({ sessionId, scenarioId, rules, traceContext }, () => {
       res.on('finish', () => {
         const duration = Date.now() - startTime;
         
         const span: TraceSpan = {
           id: spanId,
           traceId,
-          parentSpanId,
+          spanId,
+          parentSpanId: parentSpanId || null,
           sessionId,
           serviceName: options.serviceName,
-          name: `${req.method} ${req.path}`,
+          operationName: `${req.method} ${req.path}`,
           method: req.method,
           url: req.originalUrl || req.url,
-          status: res.statusCode,
-          startTime,
-          duration,
-          source: SpanSource.SERVER,
-          requestHeaders: req.headers as Record<string, string>,
-          responseHeaders: res.getHeaders() as Record<string, string>
+          statusCode: res.statusCode,
+          startedAt: startTime,
+          endedAt: Date.now(),
+          durationMs: duration,
+          source: 'internal-service',
+          attributes: {
+            mocked: Boolean(match.matched),
+            requestHeaders: JSON.stringify(req.headers),
+            responseHeaders: JSON.stringify(res.getHeaders())
+          },
+          events: [],
+          error: res.statusCode >= 500 ? `HTTP ${res.statusCode}` : null,
+          scenarioApplied: match.rule?.name || null
         };
 
         reporter.addSpan(span);
       });
 
-      next();
+      if (!match.matched || !match.action || !match.rule) {
+        next();
+        return;
+      }
+
+      const mock = ruleExecutor.executeAction(match.action);
+      match.rule.appliedCount = (match.rule.appliedCount || 0) + 1;
+      const sendMock = () => {
+        Object.entries(mock.headers).forEach(([name, value]) => res.setHeader(name, String(value)));
+        if (!res.hasHeader('Content-Type')) res.setHeader('Content-Type', 'application/json');
+        res.setHeader('X-ApiLens-Mocked', 'true');
+        res.setHeader('X-ApiLens-Rule', match.rule!.name);
+        res.setHeader('X-ApiLens-Transport', 'server-sdk');
+        res.setHeader('X-ApiLens-Session', sessionId);
+        res.status(mock.statusCode).send(mock.body);
+      };
+      if (mock.delayMs > 0) setTimeout(sendMock, mock.delayMs);
+      else sendMock();
     });
   };
 }

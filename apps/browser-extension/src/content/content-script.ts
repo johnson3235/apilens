@@ -1,72 +1,86 @@
-// Content script injected into every page
-const script = document.createElement('script');
-script.textContent = `
-  (function() {
-    const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
-      const startTime = Date.now();
-      const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && typeof args[0] === 'object' ? (args[0] as Request).url : '');
-      const reqMethod = (args[1] && args[1].method) || 'GET';
-      
-      try {
-        const response = await originalFetch.apply(this, args);
-        const endTime = Date.now();
-        
-        window.postMessage({
-          type: '__APILENS_FETCH_OBSERVE',
-          payload: {
-            url: reqUrl,
-            method: reqMethod,
-            status: response.status,
-            duration: endTime - startTime
-          }
-        }, '*');
-        
-        return response;
-      } catch (error) {
-        window.postMessage({
-          type: '__APILENS_FETCH_OBSERVE',
-          payload: {
-            url: reqUrl,
-            method: reqMethod,
-            status: 0,
-            error: error instanceof Error ? error.message : String(error)
-          }
-        }, '*');
-        throw error;
-      }
-    };
-    
-    const originalXhrOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function(...args) {
-      this._apilens_method = args[0];
-      this._apilens_url = args[1];
-      this._apilens_startTime = Date.now();
-      
-      this.addEventListener('load', function() {
-        window.postMessage({
-          type: '__APILENS_XHR_OBSERVE',
-          payload: {
-            url: this._apilens_url,
-            method: this._apilens_method,
-            status: this.status,
-            duration: Date.now() - this._apilens_startTime
-          }
-        }, '*');
-      });
-      
-      originalXhrOpen.apply(this, args);
-    };
-  })();
-`;
-document.documentElement.appendChild(script);
-script.remove();
+import type { Rule } from '@apilens/shared-types';
 
-window.addEventListener('message', (event) => {
-  if (event.source !== window || !event.data || typeof event.data !== 'object') return;
-  
-  if (event.data.type === '__APILENS_FETCH_OBSERVE' || event.data.type === '__APILENS_XHR_OBSERVE') {
-    // Send to background script if needed
-    // chrome.runtime.sendMessage(...)
+const runtimeApi: typeof chrome = (globalThis as typeof globalThis & { browser?: typeof chrome }).browser ?? chrome;
+const bridgeWindow = globalThis as typeof globalThis & { __APILENS_BRIDGE_CLEANUP__?: () => void };
+bridgeWindow.__APILENS_BRIDGE_CLEANUP__?.();
+
+let rules: Rule[] = [];
+let rulesRevision = '';
+const pendingSelfTests = new Map<string, { respond: (result: unknown) => void; timer: number }>();
+
+function publishRules() {
+  window.postMessage({
+    source: 'apilens-isolated-bridge',
+    type: 'RULES_UPDATED',
+    rules,
+    revision: rulesRevision
+  }, '*');
+}
+
+const runtimeListener = (message: any, _sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => {
+  if (message.type === 'RULES_UPDATED' && Array.isArray(message.rules)) {
+    rules = message.rules;
+    rulesRevision = typeof message.revision === 'string' ? message.revision : '';
+    publishRules();
   }
-});
+  if (message.type === 'CHECK_INTERCEPTOR') {
+    if (Array.isArray(message.rules)) rules = message.rules;
+    rulesRevision = typeof message.revision === 'string' ? message.revision : rulesRevision;
+    publishRules();
+  }
+  if (message.type === 'RUN_INTERCEPTOR_SELF_TEST') {
+    const requestId = crypto.randomUUID();
+    const timer = window.setTimeout(() => {
+      pendingSelfTests.delete(requestId);
+      sendResponse({ ok: false, error: 'The page interceptor did not answer the self-test.' });
+    }, 3_000);
+    pendingSelfTests.set(requestId, { respond: sendResponse, timer });
+    window.postMessage({ source: 'apilens-isolated-bridge', type: 'RUN_SELF_TEST', requestId }, '*');
+    return true;
+  }
+};
+
+const pageListener = (event: MessageEvent) => {
+  if (event.source !== window || event.data?.source !== 'apilens-page-interceptor') return;
+  if (event.data.type === 'READY') publishRules();
+  if (event.data.type === 'INTERCEPTOR_STATUS') {
+    void runtimeApi.runtime.sendMessage({ type: 'INTERCEPTOR_STATUS', status: event.data.status }).catch(() => undefined);
+  }
+  if (event.data.type === 'MOCK_INTERCEPTED') {
+    void runtimeApi.runtime.sendMessage({ type: 'MOCK_INTERCEPTED', request: event.data.request }).catch(() => undefined);
+  }
+  if (event.data.type === 'SELF_TEST_RESULT' && typeof event.data.requestId === 'string') {
+    const pending = pendingSelfTests.get(event.data.requestId);
+    if (pending) {
+      window.clearTimeout(pending.timer);
+      pendingSelfTests.delete(event.data.requestId);
+      pending.respond(event.data.result);
+    }
+  }
+};
+
+runtimeApi.runtime.onMessage.addListener(runtimeListener);
+window.addEventListener('message', pageListener);
+bridgeWindow.__APILENS_BRIDGE_CLEANUP__ = () => {
+  runtimeApi.runtime.onMessage.removeListener(runtimeListener);
+  window.removeEventListener('message', pageListener);
+  pendingSelfTests.forEach(pending => {
+    window.clearTimeout(pending.timer);
+    pending.respond({ ok: false, error: 'The ApiLens bridge was reloaded during the self-test.' });
+  });
+  pendingSelfTests.clear();
+};
+
+void runtimeApi.runtime.sendMessage({ type: 'GET_RULES' }).then(response => {
+  if (Array.isArray(response)) {
+    // Backward compatibility while an old service worker is being replaced.
+    rules = response;
+    rulesRevision = '';
+  } else if (Array.isArray(response?.rules)) {
+    rules = response.rules;
+    rulesRevision = typeof response.revision === 'string' ? response.revision : '';
+  } else {
+    return;
+  }
+  publishRules();
+}).catch(() => undefined);

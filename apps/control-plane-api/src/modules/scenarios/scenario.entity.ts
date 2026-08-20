@@ -1,8 +1,8 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
-import { Scenario as IScenario, ScenarioStatus, Rule } from '@apilens/shared-types';
+import { ScenarioStatus, Rule } from '@apilens/shared-types';
 
 @Entity('scenarios')
-export class ScenarioEntity implements IScenario {
+export class ScenarioEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 

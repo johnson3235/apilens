@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 
-const router = Router();
+const router: Router = Router();
 
 router.post('/', async (req, res) => {
   const { amount, currency = 'USD', customerId } = req.body;

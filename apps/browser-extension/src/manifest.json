@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
   "name": "ApiLens - API Inspector & Mock Engine",
-  "version": "0.1.0",
+  "version": "0.6.1",
   "description": "See every API. Break anything. Ship with confidence.",
   "permissions": [
     "webRequest",
     "declarativeNetRequest",
-    "declarativeNetRequestFeedback",
     "storage",
-    "activeTab",
+    "scripting",
     "debugger",
+    "alarms",
+    "activeTab",
     "tabs"
   ],
   "host_permissions": [
@@ -30,8 +31,26 @@
     "128": "icons/icon128.png"
   },
   "background": {
+    "scripts": [
+      "background/service-worker.js"
+    ],
     "service_worker": "background/service-worker.js",
     "type": "module"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "apilens@local.dev",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ],
+        "optional": [
+          "websiteActivity",
+          "technicalAndInteraction"
+        ]
+      }
+    }
   },
   "devtools_page": "devtools/devtools.html",
   "content_scripts": [
@@ -40,9 +59,24 @@
         "<all_urls>"
       ],
       "js": [
+        "content/page-interceptor.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
         "content/content-script.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "ISOLATED"
     }
   ],
   "content_security_policy": {

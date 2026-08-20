@@ -47,7 +47,7 @@ export class TracesService {
   async findBySession(sessionId: string): Promise<TraceSpan[]> {
     return this.traceRepository.find({
       where: { sessionId },
-      order: { startTime: 'ASC' },
+      order: { startedAt: 'ASC' },
     });
   }
 }

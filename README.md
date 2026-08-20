@@ -4,7 +4,7 @@ The ultimate full-stack observability and testing platform. Trace, mock, and exp
 
 ## Key Features
 - **Unified Tracing:** View full-stack requests (client, SSR, backend) in a single DevTools panel.
-- **Dynamic Mocking:** Intercept and mock responses at any level of the stack without code changes.
+- **Dynamic Mocking:** Force page `fetch`/XHR outcomes from the extension, with opt-in SDK middleware for controlled server-side services.
 - **Scenario Export:** Easily export recorded traces into Playwright or Cypress test scripts.
 - **Zero Overhead:** SDKs are completely dormant in production unless explicit QA headers are present.
 
@@ -16,7 +16,7 @@ ApiLens uses a Browser Extension for client-side interception, SDKs for backend 
 
 ## Project Structure
 - `apps/`
-  - `browser-extension`: Chrome DevTools extension.
+  - `browser-extension`: Brave, Chrome, Edge, Firefox, and Safari DevTools extension.
   - `control-plane-api`: Core backend for tracing and config.
   - `realtime-gateway`: WebSocket gateway for live updates.
 - `sdks/`

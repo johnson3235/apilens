@@ -1,8 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
-import { Session as ISession } from '@apilens/shared-types';
 
 @Entity('sessions')
-export class SessionEntity implements ISession {
+export class SessionEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 

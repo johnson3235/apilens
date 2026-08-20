@@ -35,7 +35,7 @@ export class RuleMatcher {
     if (rule.applyMode === 'once' && rule.appliedCount >= 1) return false;
     if (rule.applyMode === 'n-times' && rule.applyLimit !== undefined && rule.appliedCount >= rule.applyLimit) return false;
     if (rule.applyMode === 'probability' && rule.applyProbability !== undefined) {
-      if (Math.random() * 100 > rule.applyProbability) return false;
+      if (Math.random() * 100 >= rule.applyProbability) return false;
     }
 
     if (rule.conditions.length === 0) {

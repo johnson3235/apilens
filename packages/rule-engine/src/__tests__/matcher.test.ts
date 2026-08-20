@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RuleMatcher } from '../matcher';
 import { Rule, CapturedRequest, MatchCondition } from '@apilens/shared-types';
 
@@ -94,7 +94,7 @@ describe('RuleMatcher', () => {
   });
 
   it('evaluates Query parameter match', () => {
-    const req = createMockRequest({ queryParams: { 'id': '100', 'sort': 'desc' } });
+    const req = createMockRequest({ queryParams: { 'ID': '100', 'sort': 'desc' } });
     const cond: MatchCondition = { field: 'query', key: 'id', operator: 'equals', value: '100' };
     expect(matcher.evaluateCondition(cond, req)).toBe(true);
   });
@@ -171,9 +171,11 @@ describe('RuleMatcher', () => {
     const req = createMockRequest();
     const rule = createMockRule({ applyMode: 'probability', applyProbability: 100 });
     expect(matcher.evaluateRule(rule, req)).toBe(true);
-    
+
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
     rule.applyProbability = 0;
     expect(matcher.evaluateRule(rule, req)).toBe(false);
+    random.mockRestore();
   });
 
   it('evaluates case insensitive matching', () => {

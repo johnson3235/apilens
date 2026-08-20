@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { Rule } from '@apilens/shared-types';
 
 export interface TraceContext {
   traceId: string;
@@ -9,6 +10,7 @@ export interface TraceContext {
 export interface QAContext {
   sessionId: string;
   scenarioId?: string;
+  rules?: Rule[];
   traceContext: TraceContext;
 }
 

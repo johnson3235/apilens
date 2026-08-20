@@ -19,6 +19,11 @@ export const PopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState<boolean>(true);
   const [activeTabDomain, setActiveTabDomain] = useState<string>('Loading...');
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
+  const [interceptorStatus, setInterceptorStatus] = useState<{ installed: boolean; hooksInstalled?: boolean; rulesSynced?: boolean; engine?: 'page' | 'chromium-network' | 'none'; networkMockActive?: boolean; frames: any[]; enabledRuleCount: number; selfTest?: { ok: boolean; fetch?: { status?: number }; xhr?: { status?: number }; error?: string } | null; error?: string | null }>({ installed: false, frames: [], enabledRuleCount: 0 });
+  const [isRepairing, setIsRepairing] = useState(false);
+  const [isTestingEngine, setIsTestingEngine] = useState(false);
+  const [serverIntegrationEnabled, setServerIntegrationEnabled] = useState(false);
+  const extensionVersion = chrome.runtime.getManifest().version;
   
   // Data
   const [requests, setRequests] = useState<CapturedRequest[]>([]);
@@ -63,11 +68,12 @@ export const PopupApp: React.FC = () => {
     });
 
     // Load persisted settings
-    chrome.storage.local.get(['isRecording', 'captureMode', 'ignoreAssets', 'keywordLogic'], (res) => {
+    chrome.storage.local.get(['isRecording', 'captureMode', 'ignoreAssets', 'keywordLogic', 'serverIntegrationEnabled'], (res) => {
       if (res.isRecording !== undefined) setIsRecording(res.isRecording);
       if (res.captureMode) setCaptureMode(res.captureMode);
       if (res.ignoreAssets !== undefined) setIgnoreAssets(res.ignoreAssets);
       if (res.keywordLogic) setKeywordLogic(res.keywordLogic);
+      setServerIntegrationEnabled(Boolean(res.serverIntegrationEnabled));
     });
 
     // Load Keywords & Rules
@@ -94,11 +100,67 @@ export const PopupApp: React.FC = () => {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, [activeTabId]);
 
+  useEffect(() => {
+    if (!activeTabId) return;
+    const refreshStatus = () => {
+      chrome.runtime.sendMessage({ type: 'GET_INTERCEPTOR_STATUS', tabId: activeTabId }, response => {
+        if (response) setInterceptorStatus(response);
+      });
+    };
+    refreshStatus();
+    const timer = window.setInterval(refreshStatus, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeTabId]);
+
   const toggleRecording = () => {
     const nextState = !isRecording;
     setIsRecording(nextState);
     chrome.storage.local.set({ isRecording: nextState });
     chrome.runtime.sendMessage({ type: 'SET_RECORDING', enabled: nextState });
+  };
+
+  const toggleServerIntegration = () => {
+    const enabled = !serverIntegrationEnabled;
+    setServerIntegrationEnabled(enabled);
+    chrome.storage.local.set({ serverIntegrationEnabled: enabled });
+  };
+
+  const syncRulesToPage = (rules: Rule[], successMessage?: string) => {
+    chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules, tabId: activeTabId }, response => {
+      const runtimeError = chrome.runtime.lastError?.message;
+      if (response) setInterceptorStatus(response);
+      if (response?.ok) {
+        if (successMessage) alert(successMessage);
+        return;
+      }
+      alert(`ApiLens saved the rule, but neither mock engine could be activated.${runtimeError || response?.error ? `\n\n${runtimeError || response?.error}` : ''}\n\nClick Repair now, then reload the page.`);
+    });
+  };
+
+  const repairInterceptor = () => {
+    if (!activeTabId) return;
+    setIsRepairing(true);
+    chrome.runtime.sendMessage({ type: 'REPAIR_INTERCEPTOR', tabId: activeTabId }, response => {
+      setIsRepairing(false);
+      chrome.runtime.sendMessage({ type: 'GET_INTERCEPTOR_STATUS', tabId: activeTabId }, status => {
+        if (status) setInterceptorStatus(status);
+      });
+      if (!response?.ok && response?.error) alert(`ApiLens repair failed: ${response.error}`);
+    });
+  };
+
+  const runEngineSelfTest = () => {
+    if (!activeTabId) return;
+    setIsTestingEngine(true);
+    chrome.runtime.sendMessage({ type: 'RUN_MOCK_SELF_TEST', tabId: activeTabId }, response => {
+      setIsTestingEngine(false);
+      setInterceptorStatus(previous => ({ ...previous, selfTest: response || { ok: false, error: 'No self-test response was received.' } }));
+      if (response?.ok) {
+        alert(`ApiLens self-test passed.\nFetch: ${response.fetch?.status}\nXHR: ${response.xhr?.status}`);
+      } else {
+        alert(`ApiLens self-test failed: ${response?.error || 'Unknown interceptor error.'}`);
+      }
+    });
   };
 
   const toggleKeywordLogic = () => {
@@ -186,8 +248,7 @@ export const PopupApp: React.FC = () => {
     const updated = [...mockRules, newRule];
     setMockRules(updated);
     saveRules(updated);
-    chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
-    alert(`⚡ Instant Block Activated! Requests containing "${target}" will fail with 503.`);
+    syncRulesToPage(updated, `⚡ ApiLens confirmed the block. Requests containing "${target}" will fail with 503.`);
   };
 
   // Quick Failure Template Injections
@@ -233,9 +294,8 @@ export const PopupApp: React.FC = () => {
     const updated = [...mockRules, newRule];
     setMockRules(updated);
     saveRules(updated);
-    chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
+    syncRulesToPage(updated, `⚡ ApiLens confirmed preset ${type} for "${mockTargetUrl}".`);
     setShowMockForm(false);
-    alert(`⚡ Preset ${type} applied for "${mockTargetUrl}"!`);
   };
 
   // Save Custom Mock Rule
@@ -262,24 +322,24 @@ export const PopupApp: React.FC = () => {
     const updated = [...mockRules, newRule];
     setMockRules(updated);
     saveRules(updated);
-    chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
+    const target = mockTargetUrl;
+    syncRulesToPage(updated, `ApiLens confirmed the mock. Requests containing "${target}" will return ${mockStatus}.`);
     setShowMockForm(false);
     setMockTargetUrl('');
-    alert(`Mock Rule Active! Requests containing "${mockTargetUrl}" will return ${mockStatus}.`);
   };
 
   const handleToggleRule = (id: string) => {
     const updated = mockRules.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r);
     setMockRules(updated);
     saveRules(updated);
-    chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
+    syncRulesToPage(updated);
   };
 
   const handleDeleteRule = (id: string) => {
     const updated = mockRules.filter(r => r.id !== id);
     setMockRules(updated);
     saveRules(updated);
-    chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
+    syncRulesToPage(updated);
   };
 
   const handleImportRulesFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -292,8 +352,7 @@ export const PopupApp: React.FC = () => {
         const merged = [...mockRules, ...imported];
         setMockRules(merged);
         saveRules(merged);
-        chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: merged });
-        alert(`Successfully imported ${imported.length} QA mock rules!`);
+        syncRulesToPage(merged, `Successfully imported and activated ${imported.length} QA mock rules.`);
       } catch (err) {
         alert('Failed to import rules file. Invalid JSON.');
       }
@@ -359,6 +418,7 @@ export const PopupApp: React.FC = () => {
   const apiCount = requests.filter(r => r.type === 'fetch' || r.type === 'xhr' || r.type === 'graphql').length;
   const errorCount = requests.filter(r => (r.statusCode && r.statusCode >= 400) || r.error).length;
   const mockedCount = requests.filter(r => r.scenarioApplied).length;
+  const engineActive = interceptorStatus.installed && interceptorStatus.selfTest?.ok !== false;
 
   return (
     <div className="popup-container">
@@ -381,6 +441,7 @@ export const PopupApp: React.FC = () => {
               <span className="brand-vois-tag">_VOIS</span>
             </div>
             <div className="brand-sub">IE Market Enterprise QA</div>
+            <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>v{extensionVersion}</div>
           </div>
         </div>
 
@@ -414,6 +475,32 @@ export const PopupApp: React.FC = () => {
           <span className="domain-name">{activeTabDomain}</span>
         </div>
         <span className="ie-market-badge">IE Market</span>
+      </div>
+      <div style={{
+        padding: '6px 12px',
+        fontSize: '10px',
+        borderBottom: '1px solid var(--border)',
+        color: engineActive ? 'var(--accent-green)' : '#ff5252',
+        background: engineActive ? 'rgba(0, 230, 118, 0.06)' : 'rgba(255, 82, 82, 0.08)'
+      }}>
+        {engineActive
+          ? <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+              <span>✓ {interceptorStatus.engine === 'chromium-network' ? 'Network mock engine active' : 'Page mock engine active'} · Fetch/XHR self-test {interceptorStatus.selfTest?.ok ? 'passed' : 'available'} · {interceptorStatus.enabledRuleCount} rule(s)</span>
+              <button className="btn-secondary" style={{ padding: '2px 8px', fontSize: '9px' }} onClick={runEngineSelfTest} disabled={isTestingEngine}>
+                {isTestingEngine ? 'Testing…' : 'Run test'}
+              </button>
+            </div>
+          : <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+              <span>⚠ {interceptorStatus.selfTest?.ok === false ? `Self-test failed: ${interceptorStatus.selfTest.error || 'fetch/XHR did not return 503'}` : interceptorStatus.hooksInstalled && !interceptorStatus.rulesSynced ? 'Rules are not synced to this page' : 'No mock engine is active'}{interceptorStatus.error ? `: ${interceptorStatus.error}` : ''}</span>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <button className="btn-secondary" style={{ padding: '2px 8px', fontSize: '9px' }} onClick={runEngineSelfTest} disabled={isTestingEngine || !interceptorStatus.hooksInstalled}>
+                  {isTestingEngine ? 'Testing…' : 'Run test'}
+                </button>
+                <button className="btn-secondary" style={{ padding: '2px 8px', fontSize: '9px' }} onClick={repairInterceptor} disabled={isRepairing}>
+                  {isRepairing ? 'Repairing…' : 'Repair now'}
+                </button>
+              </div>
+            </div>}
       </div>
 
       {/* TAB 1: LIVE NETWORK FEED */}
@@ -631,6 +718,21 @@ export const PopupApp: React.FC = () => {
               <button className="btn-primary" style={{ width: '100%', marginBottom: '12px' }} onClick={() => setShowMockForm(true)}>
                 + Create Failure / Mock Rule
               </button>
+              <div style={{ fontSize: '10px', color: 'var(--accent-yellow)', marginBottom: '10px', lineHeight: 1.4 }}>
+                Mocks work with F12 DevTools open. ApiLens stops matched fetch/XHR calls before the network and returns the configured response directly to the page.
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', padding: '8px', marginBottom: '10px', border: '1px solid var(--border)', borderRadius: '6px' }}>
+                <div>
+                  <div style={{ fontSize: '10px', fontWeight: 700 }}>Node SDK server integration</div>
+                  <div style={{ fontSize: '9px', color: 'var(--text-muted)', lineHeight: 1.35 }}>
+                    Off is safest. Enable only for services using the ApiLens SDK; it adds QA headers to requests.
+                  </div>
+                </div>
+                <label className="toggle" style={{ flexShrink: 0, transform: 'scale(0.8)' }}>
+                  <input type="checkbox" checked={serverIntegrationEnabled} onChange={toggleServerIntegration} />
+                  <span className="slider"></span>
+                </label>
+              </div>
 
               <div className="feed-list" style={{ flex: 1, maxHeight: '220px' }}>
                 {mockRules.length === 0 ? (

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-const router = Router();
+const router: Router = Router();
 
 const products = [
   { id: '1', name: 'Widget Pro', price: 29.99, description: 'The best widget', inStock: true },

@@ -1,6 +1,6 @@
 export type RequestSource = 'browser' | 'frontend-server' | 'bff' | 'gateway' | 'internal-service';
 export type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS' | 'HEAD';
-export type RequestType = 'fetch' | 'xhr' | 'graphql' | 'websocket' | 'sse' | 'navigation' | 'form' | 'beacon' | 'static';
+export type RequestType = 'fetch' | 'xhr' | 'graphql' | 'websocket' | 'sse' | 'navigation' | 'form' | 'beacon' | 'static' | 'other';
 
 export interface CapturedRequest {
   id: string;

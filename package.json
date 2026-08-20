@@ -9,7 +9,8 @@
     "test:e2e": "turbo run test:e2e",
     "lint": "turbo run lint",
     "format": "turbo run format",
-    "clean": "turbo run clean"
+    "clean": "turbo run clean",
+    "brave": "powershell -ExecutionPolicy Bypass -File scripts/launch-brave-extension.ps1"
   },
   "devDependencies": {
     "typescript": "~5.5.0",

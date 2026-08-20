@@ -29,6 +29,7 @@ const App: React.FC = () => {
   const [methodFilter, setMethodFilter] = useState<string>('ALL');
   const [typeFilter, setTypeFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [mockFilter, setMockFilter] = useState<'ALL' | 'MOCKED' | 'REAL' | 'SERVER'>('ALL');
   const [ignoreAssets, setIgnoreAssets] = useState<boolean>(true);
   const [activeChipKeyword, setActiveChipKeyword] = useState<string>('');
 
@@ -93,7 +94,7 @@ const App: React.FC = () => {
     const updated = [...rules, newRule];
     setRules(updated);
     saveRules(updated);
-    chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
+    chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated, tabId: chrome.devtools.inspectedWindow.tabId });
     setActiveTab('scenarios');
   };
 
@@ -107,7 +108,7 @@ const App: React.FC = () => {
         const merged = [...rules, ...imported];
         setRules(merged);
         saveRules(merged);
-        chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: merged });
+        chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: merged, tabId: chrome.devtools.inspectedWindow.tabId });
         alert(`Successfully imported ${imported.length} QA mock rules!`);
       } catch (err) {
         alert('Failed to import rules. Check JSON structure.');
@@ -165,6 +166,10 @@ const App: React.FC = () => {
       if (statusFilter === '5XX' && s < 500) return false;
       if (statusFilter === 'ERR' && !req.error && (s < 400 || !s)) return false;
     }
+
+    if (mockFilter === 'MOCKED' && !req.scenarioApplied) return false;
+    if (mockFilter === 'REAL' && req.scenarioApplied) return false;
+    if (mockFilter === 'SERVER' && req.isClientSide) return false;
 
     return true;
   });
@@ -252,6 +257,18 @@ const App: React.FC = () => {
                 <option value="API">Fetch / XHR Only</option>
                 <option value="NAV">Navigation</option>
                 <option value="STATIC">Static Assets</option>
+              </select>
+
+              <select
+                className="input-sm"
+                value={mockFilter}
+                onChange={e => setMockFilter(e.target.value as typeof mockFilter)}
+                style={{ width: '150px' }}
+              >
+                <option value="ALL">All Traffic</option>
+                <option value="MOCKED">⚡ Mocked by ApiLens</option>
+                <option value="REAL">Real Responses</option>
+                <option value="SERVER">Server-side Only</option>
               </select>
 
               <select 
@@ -343,19 +360,19 @@ const App: React.FC = () => {
               const updated = [...rules.filter(rule => rule.id !== r.id), r];
               setRules(updated);
               saveRules(updated);
-              chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
+              chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated, tabId: chrome.devtools.inspectedWindow.tabId });
             }}
             onRemoveRule={id => {
               const updated = rules.filter(r => r.id !== id);
               setRules(updated);
               saveRules(updated);
-              chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
+              chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated, tabId: chrome.devtools.inspectedWindow.tabId });
             }}
             onToggleRule={id => {
               const updated = rules.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r);
               setRules(updated);
               saveRules(updated);
-              chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated });
+              chrome.runtime.sendMessage({ type: 'SYNC_RULES', rules: updated, tabId: chrome.devtools.inspectedWindow.tabId });
             }}
           />
         )}

@@ -12,6 +12,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         'Content-Type': 'application/json',
         'x-qa-session-id': req.headers['x-qa-session-id'] as string || '',
         'x-test-scenario-id': req.headers['x-test-scenario-id'] as string || '',
+        'x-apilens-rules': req.headers['x-apilens-rules'] as string || '',
       },
       body: JSON.stringify(req.body)
     });

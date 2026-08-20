@@ -3,7 +3,7 @@ import https from 'https';
 import { v4 as uuidv4 } from 'uuid';
 import { getFullContext } from './context';
 import { TraceReporter } from './trace-reporter';
-import { TraceSpan, SpanSource } from '@apilens/shared-types';
+import { TraceSpan } from '@apilens/shared-types';
 
 let originalHttpRequest: typeof http.request | null = null;
 let originalHttpsRequest: typeof https.request | null = null;
@@ -17,7 +17,7 @@ export function enableHttpInterception(reporter: TraceReporter, serviceName: str
   originalHttpsRequest = https.request;
 
   function createInterceptor(originalRequest: any, protocol: string) {
-    return function interceptor(...args: any[]) {
+    return function interceptor(this: any, ...args: any[]) {
       const ctx = getFullContext();
       if (!ctx) {
         return originalRequest.apply(this, args);
@@ -42,6 +42,9 @@ export function enableHttpInterception(reporter: TraceReporter, serviceName: str
       if (ctx.scenarioId) {
         options.headers['x-test-scenario-id'] = ctx.scenarioId;
       }
+      if (ctx.rules?.length) {
+        options.headers['x-apilens-rules'] = Buffer.from(JSON.stringify(ctx.rules), 'utf8').toString('base64');
+      }
       
       const childSpanId = uuidv4().replace(/-/g, '').substring(0, 16);
       options.headers['traceparent'] = `00-${ctx.traceContext.traceId}-${childSpanId}-01`;
@@ -59,18 +62,25 @@ export function enableHttpInterception(reporter: TraceReporter, serviceName: str
         const span: TraceSpan = {
           id: childSpanId,
           traceId: ctx.traceContext.traceId,
+          spanId: childSpanId,
           parentSpanId: ctx.traceContext.spanId,
           sessionId: ctx.sessionId,
           serviceName: serviceName,
-          name: `Outbound ${method} ${targetService}`,
+          operationName: `Outbound ${method} ${targetService}`,
           method,
           url,
-          status: res.statusCode || 0,
-          startTime,
-          duration,
-          source: SpanSource.SERVER,
-          requestHeaders: options.headers as Record<string, string>,
-          responseHeaders: res.headers as Record<string, string>
+          statusCode: res.statusCode || 0,
+          startedAt: startTime,
+          endedAt: Date.now(),
+          durationMs: duration,
+          source: 'internal-service',
+          attributes: {
+            requestHeaders: JSON.stringify(options.headers),
+            responseHeaders: JSON.stringify(res.headers)
+          },
+          events: [],
+          error: null,
+          scenarioApplied: ctx.scenarioId || null
         };
 
         reporter.addSpan(span);
@@ -86,18 +96,22 @@ export function enableHttpInterception(reporter: TraceReporter, serviceName: str
         const span: TraceSpan = {
           id: childSpanId,
           traceId: ctx.traceContext.traceId,
+          spanId: childSpanId,
           parentSpanId: ctx.traceContext.spanId,
           sessionId: ctx.sessionId,
           serviceName: serviceName,
-          name: `Outbound ${method} ${targetService} (Error)`,
+          operationName: `Outbound ${method} ${targetService} (Error)`,
           method,
           url,
-          status: 0,
-          startTime,
-          duration,
-          source: SpanSource.SERVER,
-          requestHeaders: options.headers as Record<string, string>,
-          responseHeaders: {}
+          statusCode: null,
+          startedAt: startTime,
+          endedAt: Date.now(),
+          durationMs: duration,
+          source: 'internal-service',
+          attributes: { requestHeaders: JSON.stringify(options.headers) },
+          events: [],
+          error: err.message,
+          scenarioApplied: ctx.scenarioId || null
         };
 
         reporter.addSpan(span);

@@ -35,13 +35,18 @@ interface CheckoutProps {
 export const getServerSideProps: GetServerSideProps<CheckoutProps> = async (context) => {
   // Wrap with SDK context manually for SSR if middleware isn't present
   const sessionId = context.req.headers['x-qa-session-id'] as string;
+  const rules = context.req.headers['x-apilens-rules'] as string;
+  const qaHeaders = {
+    ...(sessionId ? { 'x-qa-session-id': sessionId } : {}),
+    ...(rules ? { 'x-apilens-rules': rules } : {})
+  };
   
   try {
     const customerRes = await fetch('http://localhost:4001/api/customers/1', {
-      headers: sessionId ? { 'x-qa-session-id': sessionId } : {}
+      headers: qaHeaders
     });
     const productsRes = await fetch('http://localhost:4001/api/products', {
-      headers: sessionId ? { 'x-qa-session-id': sessionId } : {}
+      headers: qaHeaders
     });
     
     const customer = customerRes.ok ? await customerRes.json() : null;

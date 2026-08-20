@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-const router = Router();
+const router: Router = Router();
 
 const customers = [
   { id: '1', name: 'Alice Smith', email: 'alice@example.com', address: '123 Main St', memberSince: '2023-01-15' },

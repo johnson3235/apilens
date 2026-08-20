@@ -1,3 +1,5 @@
+import { extensionApi } from './browser-api';
+
 export type MessageType =
   | 'REQUEST_CAPTURED'
   | 'REQUEST_COMPLETED'
@@ -30,7 +32,7 @@ export function sendMessage<T>(type: MessageType, payload: T, tabId?: number): v
     tabId,
     timestamp: Date.now()
   };
-  chrome.runtime.sendMessage(msg).catch(() => {
+  extensionApi.runtime.sendMessage(msg).catch(() => {
     // Ignore errors when no listener exists
   });
 }
@@ -46,7 +48,7 @@ export function sendToDevTools<T>(type: MessageType, payload: T, tabId: number):
     tabId,
     timestamp: Date.now()
   };
-  chrome.runtime.sendMessage(msg).catch(() => {});
+  extensionApi.runtime.sendMessage(msg).catch(() => {});
 }
 
 export function onMessage<T>(
@@ -63,8 +65,8 @@ export function onMessage<T>(
     }
   };
 
-  chrome.runtime.onMessage.addListener(listener);
+  extensionApi.runtime.onMessage.addListener(listener);
   return () => {
-    chrome.runtime.onMessage.removeListener(listener);
+    extensionApi.runtime.onMessage.removeListener(listener);
   };
 }

@@ -91,22 +91,24 @@ export class ScenariosService {
     code += `export async function setupMocks(page: Page) {\n`;
 
     for (const rule of scenario.rules) {
-      if (rule.condition.urlPattern) {
-        code += `  await page.route('${rule.condition.urlPattern}', async route => {\n`;
+      const urlCondition = rule.conditions.find(condition => condition.field === 'url' || condition.field === 'path');
+      if (urlCondition?.value) {
+        const urlPattern = urlCondition.operator === 'equals' ? urlCondition.value : `**/*${urlCondition.value}*`;
+        code += `  await page.route('${urlPattern}', async route => {\n`;
         
-        if (rule.action.type === 'mock_response') {
+        if (rule.action.type === 'status-code' || rule.action.type === 'custom-body' || rule.action.type === 'rate-limit') {
           code += `    await route.fulfill({\n`;
           code += `      status: ${rule.action.statusCode || 200},\n`;
-          if (rule.action.headers) {
-            code += `      headers: ${JSON.stringify(rule.action.headers)},\n`;
+          if (rule.action.responseHeaders) {
+            code += `      headers: ${JSON.stringify(rule.action.responseHeaders)},\n`;
           }
-          if (rule.action.body) {
-            code += `      body: JSON.stringify(${JSON.stringify(rule.action.body)}),\n`;
+          if (rule.action.responseBody) {
+            code += `      body: ${JSON.stringify(rule.action.responseBody)},\n`;
           }
           code += `    });\n`;
-        } else if (rule.action.type === 'simulate_error') {
-          code += `    await route.abort('${rule.action.errorType === 'network_error' ? 'failed' : 'aborted'}');\n`;
-        } else if (rule.action.type === 'delay') {
+        } else if (['connection-reset', 'timeout', 'dns-failure'].includes(rule.action.type)) {
+          code += `    await route.abort('failed');\n`;
+        } else if (rule.action.delayMs) {
           code += `    await new Promise(resolve => setTimeout(resolve, ${rule.action.delayMs || 1000}));\n`;
           code += `    await route.continue();\n`;
         }

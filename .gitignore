@@ -16,6 +16,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 .system_generated/
+.brave-extension-profile/
 
 # Environment Variables & Secrets
 .env

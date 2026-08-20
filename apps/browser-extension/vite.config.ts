@@ -54,6 +54,7 @@ export default defineConfig({
         'devtools/panel': resolve(__dirname, 'src/devtools/panel.tsx'),
         'popup/popup': resolve(__dirname, 'src/popup/popup.tsx'),
         'content/content-script': resolve(__dirname, 'src/content/content-script.ts'),
+        'content/page-interceptor': resolve(__dirname, 'src/content/page-interceptor.ts'),
       },
       output: {
         entryFileNames: '[name].js',

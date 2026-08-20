@@ -269,6 +269,9 @@ importers:
 
   sdks/node:
     dependencies:
+      '@apilens/rule-engine':
+        specifier: workspace:*
+        version: link:../../packages/rule-engine
       '@apilens/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types

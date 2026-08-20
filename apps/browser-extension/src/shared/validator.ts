@@ -1,4 +1,5 @@
 import { CapturedRequest } from '@apilens/shared-types';
+import { extensionApi } from './browser-api';
 
 export interface ValidationRule {
   id: string;
@@ -36,7 +37,7 @@ export const DEFAULT_VALIDATION_RULES: ValidationRule[] = [
 
 export async function loadValidationRules(): Promise<ValidationRule[]> {
   try {
-    const data = await chrome.storage.local.get(STORAGE_KEY);
+    const data = await extensionApi.storage.local.get(STORAGE_KEY);
     if (data[STORAGE_KEY] && Array.isArray(data[STORAGE_KEY])) {
       return data[STORAGE_KEY];
     }
@@ -48,7 +49,7 @@ export async function loadValidationRules(): Promise<ValidationRule[]> {
 
 export async function saveValidationRules(rules: ValidationRule[]): Promise<void> {
   try {
-    await chrome.storage.local.set({ [STORAGE_KEY]: rules });
+    await extensionApi.storage.local.set({ [STORAGE_KEY]: rules });
   } catch (e) {
     console.error('Error saving validation rules:', e);
   }

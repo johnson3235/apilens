@@ -56,6 +56,7 @@ export const RequestList: React.FC<RequestListProps> = ({
               <th>Path / URL</th>
               <th style={{ width: '80px' }}>Duration</th>
               <th style={{ width: '80px' }}>Type</th>
+              <th style={{ width: '145px' }}>Result</th>
               <th style={{ width: '90px' }}>Actions</th>
             </tr>
           </thead>
@@ -72,6 +73,11 @@ export const RequestList: React.FC<RequestListProps> = ({
                 <td title={req.url} style={{ fontFamily: 'monospace' }}>{req.path || req.url}</td>
                 <td>{req.durationMs ? `${req.durationMs}ms` : '-'}</td>
                 <td><span className="tag">{req.type}</span></td>
+                <td>
+                  {req.scenarioApplied
+                    ? <span className="apilens-mocked-badge">⚡ MOCKED BY APILENS</span>
+                    : <span className="apilens-real-badge">REAL RESPONSE</span>}
+                </td>
                 <td>
                   {onCreateRule && (
                     <button 

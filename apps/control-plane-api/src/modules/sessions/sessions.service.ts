@@ -48,7 +48,7 @@ export class SessionsService {
     const spans = await this.tracesService.findBySession(id);
     
     // Sort spans by start time
-    spans.sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+    spans.sort((a, b) => a.startedAt - b.startedAt);
     
     // Build tree/depth
     const entries: TimelineEntry[] = [];
@@ -56,12 +56,26 @@ export class SessionsService {
     
     for (const span of spans) {
       const entry: TimelineEntry = {
-        span,
+        id: span.id,
+        type: 'span',
+        source: span.source,
+        serviceName: span.serviceName,
+        operation: span.operationName,
+        method: span.method,
+        url: span.url,
+        statusCode: span.statusCode,
+        durationMs: span.durationMs,
+        startedAt: span.startedAt,
+        endedAt: span.endedAt,
         depth: 0,
+        parentId: span.parentSpanId,
+        scenarioApplied: span.scenarioApplied,
+        isClientSide: span.source === 'browser',
+        error: span.error,
       };
       
-      if (span.parentId && spanMap.has(span.parentId)) {
-        entry.depth = spanMap.get(span.parentId)!.depth + 1;
+      if (span.parentSpanId && spanMap.has(span.parentSpanId)) {
+        entry.depth = spanMap.get(span.parentSpanId)!.depth + 1;
       }
       
       spanMap.set(span.id, entry);
@@ -69,11 +83,11 @@ export class SessionsService {
     }
     
     return {
+      sessionId: session.id,
       entries,
-      totalDurationMs: entries.length > 0 
-        ? new Date(entries[entries.length - 1].span.endTime || entries[entries.length - 1].span.startTime).getTime() - 
-          new Date(entries[0].span.startTime).getTime()
-        : 0
+      startTime: entries[0]?.startedAt || session.startedAt.getTime(),
+      endTime: entries[entries.length - 1]?.endedAt || session.endedAt?.getTime() || Date.now(),
+      services: [...new Set(entries.map(entry => entry.serviceName))]
     };
   }
 }
