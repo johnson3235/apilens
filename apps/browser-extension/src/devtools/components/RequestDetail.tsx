@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import type { CapturedRequest, ContractSet, ResponseAssertion } from '@apilens/shared-types';
 import { formatBytes, formatClock, formatDuration } from '@apilens/core';
 import { buildReplayRequest } from '@apilens/replay-engine';
@@ -26,17 +26,17 @@ interface RequestDetailProps {
 
 function HeaderTable({ headers, redacted }: { headers: Record<string, string>; redacted: string[] }): JSX.Element {
   const entries = Object.entries(headers);
-  if (entries.length === 0) return <div className="muted">No headers captured.</div>;
+  if (entries.length === 0) return <div className="muted">No headers captured for this observation. Browser APIs may expose only a subset.</div>;
   return (
     <dl className="kv">
       {entries.map(([name, value]) => (
-        <>
-          <dt key={`${name}-k`}>
+        <Fragment key={name}>
+          <dt>
             {name}
             {redacted.includes(name.toLowerCase()) ? ' 🔒' : ''}
           </dt>
-          <dd key={`${name}-v`}>{value}</dd>
-        </>
+          <dd>{value}</dd>
+        </Fragment>
       ))}
     </dl>
   );
@@ -214,7 +214,7 @@ export function RequestDetail({
               )}
             </div>
             <div className="section">
-              <h3>Request headers</h3>
+              <h3>Request headers</h3><p className="muted">Captured browser headers. Sensitive values are redacted before storage; hidden values cannot be recovered here.</p>
               <HeaderTable headers={request.requestHeaders} redacted={redactedRequestHeaders} />
             </div>
             <div className="section">

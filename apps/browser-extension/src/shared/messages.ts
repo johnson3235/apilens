@@ -16,6 +16,7 @@ import type {
 } from '@apilens/shared-types';
 import type { ExtensionSettings } from './settings';
 import type { MockEngineHealth } from './engine-health';
+import type { TracePropagationSettings } from './trace-propagation';
 
 /**
  * Every message crossing an extension boundary is described here.
@@ -109,6 +110,7 @@ export interface BridgeToPageMessage {
   captureBodies?: boolean;
   maxBodyBytes?: number;
   mockingAllowed?: boolean;
+  trace?: TracePropagationSettings;
 }
 
 export interface PageToBridgeMessage {

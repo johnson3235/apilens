@@ -45,7 +45,7 @@ function toPage(message: BridgeToPageMessage): void {
 
 async function requestRules(): Promise<void> {
   const response = await safeRuntimeMessage<{
-    rules?: unknown; revision?: string; captureBodies?: boolean; maxBodyBytes?: number; mockingAllowed?: boolean;
+    rules?: unknown; revision?: string; trace?: BridgeToPageMessage['trace']; captureBodies?: boolean; maxBodyBytes?: number; mockingAllowed?: boolean;
   }>({ type: 'bridge:rules' });
   if (!response || !Array.isArray(response.rules) || !active) return;
   try {
@@ -59,6 +59,7 @@ async function requestRules(): Promise<void> {
     toPage({
       source: 'apilens-bridge',
       type: 'settings',
+      trace: response.trace,
       captureBodies: response.captureBodies !== false,
       maxBodyBytes: typeof response.maxBodyBytes === 'number' ? response.maxBodyBytes : undefined,
       mockingAllowed: response.mockingAllowed !== false,
@@ -71,7 +72,7 @@ const runtimeListener = (
   _sender: chrome.runtime.MessageSender,
   sendResponse: (response?: unknown) => void,
 ): boolean | undefined => {
-  const payload = message as { type?: string; rules?: unknown; revision?: string; mockingAllowed?: boolean; captureBodies?: boolean; maxBodyBytes?: number };
+  const payload = message as { type?: string; rules?: unknown; revision?: string; mockingAllowed?: boolean; trace?: BridgeToPageMessage['trace']; captureBodies?: boolean; maxBodyBytes?: number };
   if (!payload || typeof payload.type !== 'string') return undefined;
 
   if (payload.type === 'bridge:push-rules' && Array.isArray(payload.rules)) {
@@ -90,6 +91,7 @@ const runtimeListener = (
     toPage({
       source: 'apilens-bridge',
       type: 'settings',
+      trace: payload.trace,
       captureBodies: payload.captureBodies !== false,
       maxBodyBytes: payload.maxBodyBytes,
       mockingAllowed: payload.mockingAllowed !== false,

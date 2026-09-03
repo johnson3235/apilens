@@ -48,6 +48,8 @@ pnpm --filter @apilens/demo-api-server dev
 pnpm --filter @apilens/demo-nextjs-app dev
 ```
 
-Open `http://localhost:3000`, then record the checkout journey. Server-side visibility requires the Node SDK/agent path; the extension alone cannot see arbitrary internal backend calls.
+Open `http://localhost:3000`, then record the checkout journey. The existing Next demo uses server fetch and does not mount Express middleware: it does not demonstrate server-to-backend instrumentation. The legacy `@apilens/node-sdk` requires Express context and http/https calls. For App Router server fetch, explicitly integrate the separate [Next SDK](../sdks/next/README.md); the demo has not been migrated automatically.
+
+For CLEAR-APP, use the [browser-only QA runbook](clear-app-qa-setup.md). No SDK or agent is required for browser capture.
 
 See [troubleshooting.md](troubleshooting.md) for worker, engine and agent diagnostics.

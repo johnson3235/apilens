@@ -85,11 +85,13 @@ const networkMock = new ChromiumNetworkMock(
   },
 );
 
-const initialization = Promise.all([loadSettings(), loadRules(), store.restore()]).then(([loadedSettings, loadedRules, session]) => {
+const initialization = Promise.all([loadSettings(), loadRules(), store.restore()]).then(async ([loadedSettings, loadedRules, session]) => {
   settings = loadedSettings;
   rules = loadedRules;
   ruleRevision = revisionForRules(rules);
   if (session) agent.setSessionId(session.id);
+  const restoredTrace = await extensionApi.storage.session.get('apilens-tracing-tab');
+  tracingTabId = session?.status === 'recording' && typeof restoredTrace['apilens-tracing-tab'] === 'number' ? restoredTrace['apilens-tracing-tab'] : null;
   if (settings.agent.enabled) agent.connect(settings.agent, session?.id ?? null);
 });
 
@@ -280,6 +282,20 @@ function healthFor(tabId: number): MockEngineHealth {
   };
 }
 
+let tracingTabId: number | null = null;
+function traceSettingsFor(tabId: number | null) {
+  const session = store.currentSession();
+  return {
+    enabled: settings.capture.injectTraceHeaders && store.isRecording() && tabId !== null && tabId === tracingTabId,
+    sessionId: session?.id ?? null, scenarioId: session?.activeScenarioId ?? null,
+    origin: session?.startUrl ? new URL(session.startUrl).origin : null,
+  };
+}
+async function syncTraceSettings(): Promise<void> {
+  const tabs = new Set(frameStatus.keys());
+  if (tracingTabId !== null) tabs.add(tracingTabId);
+  await Promise.all([...tabs].map((tabId) => pushRulesToTab(tabId)));
+}
 async function pushRulesToTab(tabId: number): Promise<void> {
   const tab = await extensionApi.tabs.get(tabId).catch(() => null);
   const hostname = tab?.url ? parseUrl(tab.url).hostname : '';
@@ -293,6 +309,7 @@ async function pushRulesToTab(tabId: number): Promise<void> {
   });
   await sendTabMessage(tabId, {
     type: 'bridge:push-settings',
+    trace: traceSettingsFor(tabId),
     captureBodies: settings.capture.captureBodies,
     maxBodyBytes: settings.capture.maxBodyBytes,
     mockingAllowed: status.allowed,
@@ -445,7 +462,7 @@ async function handlePanelRequest(message: PanelRequest, senderTabId: number | n
       await saveSettings(settings);
       if (settings.agent.enabled) agent.connect(settings.agent, store.currentSession()?.id ?? null);
       else agent.disconnect();
-      if (senderTabId !== null) await pushRulesToTab(senderTabId);
+      await syncTraceSettings();
       await broadcastState(senderTabId);
       return { ok: true, settings };
     }
@@ -462,6 +479,9 @@ async function handlePanelRequest(message: PanelRequest, senderTabId: number | n
       });
       agent.setSessionId(session.id);
       agent.startSession(session);
+      tracingTabId = tabId;
+      await extensionApi.storage.session.set({ 'apilens-tracing-tab': tabId });
+      await syncTraceSettings();
       if (tabId !== null) consoleMessages.delete(tabId);
       await broadcastState(tabId);
       return { ok: true, state: await buildState(tabId) };
@@ -469,6 +489,9 @@ async function handlePanelRequest(message: PanelRequest, senderTabId: number | n
 
     case 'session:stop': {
       const session = await store.stopSession();
+      await syncTraceSettings();
+      tracingTabId = null;
+      await extensionApi.storage.session.remove('apilens-tracing-tab');
       if (session) agent.stopSession(session.id);
       await store.enforceRetention(settings.retention);
       await broadcastState(senderTabId);
@@ -498,6 +521,7 @@ async function handlePanelRequest(message: PanelRequest, senderTabId: number | n
         ? message.activeScenarioId
         : null;
       await store.updateSession({ name: title, scenarios, activeScenarioId });
+      await syncTraceSettings();
       await broadcastState(senderTabId);
       return { ok: true, state: await buildState(senderTabId) };
     }
@@ -670,6 +694,7 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({
         rules: status.allowed ? rules : [],
         revision: status.allowed ? ruleRevision : revisionForRules([]),
+        trace: traceSettingsFor(senderTabId),
         captureBodies: settings.capture.captureBodies,
         maxBodyBytes: settings.capture.maxBodyBytes,
         mockingAllowed: status.allowed,

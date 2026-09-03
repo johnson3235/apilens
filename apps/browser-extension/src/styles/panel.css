@@ -700,3 +700,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .screenshot-capture p { margin:6px 0 0; color:var(--warn); font-size:8px; }
 .stop-evidence { width:100%; height:40px; margin-top:10px; border:1px solid rgba(248,81,73,.45); border-radius:9px; background:rgba(248,81,73,.1); color:var(--err); font-weight:800; cursor:pointer; }
 .popup-notice,.popup-error { flex:0 0 auto; margin:0 18px 8px; }.popup-footer { flex:0 0 40px; margin:0 18px; padding:0; }
+.captured-headers { margin-top: 16px; padding: 16px; border: 1px solid #40516a; border-radius: 12px; min-width: 0; }
+.captured-headers p { font-size: 12px; line-height: 1.6; }
+.captured-headers input { display: block; width: 100%; margin-top: 8px; }
+.captured-headers dl { margin: 0; }
+.captured-headers dl > div { padding: 10px 0; border-bottom: 1px solid #40516a; }
+.captured-headers dt { font-weight: 700; overflow-wrap: anywhere; }
+.captured-headers dd { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font-family: monospace; }

@@ -43,6 +43,9 @@ The agent binds to loopback and requires its generated token.
 
 ## Documentation
 
+- [CLEAR-APP frontend SDK setup guide](docs/frontend-sdk-setup.md)
+- [Claude implementation prompt for CLEAR-APP](docs/claude-clear-app-sdk-prompt.md)
+- [Next.js server SDK API and coverage](sdks/next/README.md)
 - [Technical assessment](docs/technical-assessment.md)
 - [Architecture](docs/architecture.md)
 - [Extension](docs/extension.md)

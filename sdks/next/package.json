@@ -1,0 +1,11 @@
+{
+  "name": "@apilens/next-sdk",
+  "version": "0.1.0",
+  "description": "Opt-in Node-runtime App Router and native fetch tracing for ApiLens",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "test": "vitest run" },
+  "devDependencies": { "@types/node": "^20.12.7", "typescript": "~5.5.0", "vitest": "^1.6.0" }
+}

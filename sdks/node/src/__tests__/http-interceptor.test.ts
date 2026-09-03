@@ -38,6 +38,17 @@ describe('outgoing HTTP interception', () => {
     expect(reporter.addSpan).not.toHaveBeenCalled();
   });
 
+  it('does not instrument native fetch even within a QA context', async () => {
+    const reporter = { addSpan: vi.fn() };
+    enableHttpInterception(reporter, 'checkout-bff');
+    await runWithContext({ sessionId: 'qa-fetch', traceContext: { traceId: '0123456789abcdef0123456789abcdef', spanId: '0123456789abcdef' } }, async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/fetch-proof`);
+      await response.arrayBuffer();
+    });
+    expect(reporter.addSpan).not.toHaveBeenCalled();
+    expect(observedHeaders['x-qa-session-id']).toBeUndefined();
+  });
+
   it('propagates session and W3C trace context and reports the child span', async () => {
     const reporter = { addSpan: vi.fn() };
     enableHttpInterception(reporter, 'checkout-bff');

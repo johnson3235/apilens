@@ -5,14 +5,13 @@ import {
   contentTypeOf,
   createCapturedRequest,
   createId,
-  createSpanId,
-  createTraceId,
   isStaticAssetPath,
   normalizeHeaders,
   parseUrl,
 } from '@apilens/core';
 import { executeAction, findMatchingRule, mockMarkerHeaders } from '@apilens/mock-engine';
-import { extractTraceContext, formatTraceparent } from '@apilens/trace-engine';
+import { extractTraceContext } from '@apilens/trace-engine';
+import { traceHeadersFor, type TracePropagationSettings } from '../shared/trace-propagation';
 import type { BridgeToPageMessage, PageHookStatus, PageToBridgeMessage } from '../shared/messages';
 
 declare const __APILENS_VERSION__: string | undefined;
@@ -77,6 +76,7 @@ function install(): void {
   let captureBodies = true;
   let maxBodyBytes = 256 * 1024;
   let mockingAllowed = true;
+  let trace: TracePropagationSettings = { enabled: false, sessionId: null, scenarioId: null, origin: null };
   let statusTimer: number | null = null;
 
   const nativeFetch = resolveNative('__APILENS_FETCH_WRAPPER__', '__APILENS_FETCH_NATIVE__', window.fetch).bind(window);
@@ -145,13 +145,6 @@ function install(): void {
     return evaluation.matched && evaluation.rule ? evaluation.rule : null;
   }
 
-  function withTracePropagation(headers: Record<string, string>, request: CapturedRequest): Record<string, string> {
-    if (headers.traceparent) return headers;
-    const traceId = request.traceId ?? createTraceId();
-    const spanId = request.spanId ?? createSpanId();
-    return { ...headers, traceparent: formatTraceparent(traceId, spanId, true) };
-  }
-
   const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
   /* ---------------------------- fetch ---------------------------- */
@@ -207,10 +200,14 @@ function install(): void {
       }
     }
 
-    const outgoingHeaders = rules.length > 0 || !mockingAllowed ? headers : withTracePropagation(headers, record);
+    const outgoingHeaders = traceHeadersFor(headers, url, location.origin, trace);
+    if (outgoingHeaders !== headers) {
+      const context = extractTraceContext(outgoingHeaders);
+      record = { ...record, requestHeaders: outgoingHeaders, traceId: context?.traceId ?? null, spanId: context?.spanId ?? null };
+    }
 
     try {
-      const response = await nativeFetch(input as RequestInfo, init);
+      const response = await nativeFetch(input as RequestInfo, outgoingHeaders === headers ? init : { ...init, headers: outgoingHeaders });
       const responseHeaders = normalizeHeaders(response.headers);
       const cloned = response.clone();
       let bodyText: string | null = null;
@@ -289,7 +286,7 @@ function install(): void {
       this.apilensStartedAt = Date.now();
       this.apilensBody = typeof body === 'string' ? body : null;
 
-      const record = makeRequest(this.apilensUrl, this.apilensMethod, 'xhr', this.apilensHeaders, this.apilensBody);
+      let record = makeRequest(this.apilensUrl, this.apilensMethod, 'xhr', this.apilensHeaders, this.apilensBody);
       const rule = matchRule(record);
 
       if (rule) {
@@ -300,6 +297,14 @@ function install(): void {
         }
       }
 
+      const outgoingHeaders = traceHeadersFor(this.apilensHeaders, this.apilensUrl, location.origin, trace);
+      if (outgoingHeaders !== this.apilensHeaders) {
+        for (const [name, value] of Object.entries(outgoingHeaders)) {
+          // XHR appends repeated headers; preserve application-provided values.
+          if (!(name in this.apilensHeaders)) this.setRequestHeader(name, value);
+        }
+        record = makeRequest(this.apilensUrl, this.apilensMethod, 'xhr', this.apilensHeaders, this.apilensBody);
+      }
       this.addEventListener('loadend', () => {
         const responseHeaders = parseXhrHeaders(this.getAllResponseHeaders());
         const text = this.responseType === '' || this.responseType === 'text' ? (this.responseText ?? '') : null;
@@ -544,6 +549,7 @@ function install(): void {
       return;
     }
     if (data.type === 'settings') {
+      trace = data.trace ?? { enabled: false, sessionId: null, scenarioId: null, origin: null };
       if (typeof data.captureBodies === 'boolean') captureBodies = data.captureBodies;
       if (typeof data.maxBodyBytes === 'number') maxBodyBytes = data.maxBodyBytes;
       if (typeof data.mockingAllowed === 'boolean') mockingAllowed = data.mockingAllowed;
