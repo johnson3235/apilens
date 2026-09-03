@@ -15,7 +15,7 @@ COPY examples/demo-nextjs-app ./examples/demo-nextjs-app
 
 RUN pnpm --filter @apilens/shared-types build
 RUN pnpm --filter @apilens/node-sdk build
-RUN pnpm --filter @apilens/demo-nextjs-app build
+RUN APILENS_STANDALONE=1 pnpm --filter @apilens/demo-nextjs-app build
 
 FROM node:20-alpine AS runner
 WORKDIR /app

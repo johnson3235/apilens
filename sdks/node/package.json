@@ -10,8 +10,9 @@
   },
   "dependencies": {
     "uuid": "^9.0.1",
+    "@apilens/core": "workspace:*",
     "@apilens/shared-types": "workspace:*",
-    "@apilens/rule-engine": "workspace:*"
+    "@apilens/mock-engine": "workspace:*"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

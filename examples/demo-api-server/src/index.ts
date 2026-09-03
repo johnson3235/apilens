@@ -10,7 +10,7 @@ const port = process.env.PORT || 4001;
 
 const apilens = new ApiLensSDK({
   serviceName: 'demo-api-server',
-  reporterUrl: process.env.APILENS_REPORTER_URL || 'http://localhost:3001',
+  reporterUrl: process.env.APILENS_REPORTER_URL || 'http://127.0.0.1:7317',
 });
 
 app.use(cors());

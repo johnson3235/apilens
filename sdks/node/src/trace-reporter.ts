@@ -7,7 +7,7 @@ export class TraceReporter {
   private readonly BATCH_SIZE = 50;
 
   constructor(reporterUrl?: string) {
-    this.reporterUrl = reporterUrl || 'http://localhost:3001';
+    this.reporterUrl = reporterUrl || 'http://127.0.0.1:7317';
     this.flushInterval = setInterval(() => this.flush(), 2000);
     this.flushInterval.unref(); // Don't block process exit
   }

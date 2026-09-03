@@ -7,6 +7,7 @@ dist/
 build/
 .turbo/
 out/
+.next/
 *.tsbuildinfo
 
 # Logs & Temporary files

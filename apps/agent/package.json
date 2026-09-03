@@ -1,0 +1,37 @@
+{
+  "name": "@apilens/agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "apilens-agent": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs --watch",
+    "start": "node scripts/run.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@apilens/core": "workspace:*",
+    "@apilens/evidence": "workspace:*",
+    "@apilens/insights": "workspace:*",
+    "@apilens/mock-engine": "workspace:*",
+    "@apilens/replay-engine": "workspace:*",
+    "@apilens/security": "workspace:*",
+    "@apilens/shared-types": "workspace:*",
+    "@apilens/trace-engine": "workspace:*",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.21.5",
+    "typescript": "~5.5.0",
+    "vitest": "^1.6.0"
+  }
+}

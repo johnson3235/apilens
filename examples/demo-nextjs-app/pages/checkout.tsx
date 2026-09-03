@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { GetServerSideProps } from 'next';
-import sdk from '../apilens.config';
 
 interface Customer {
   id: string;
@@ -53,8 +52,8 @@ export const getServerSideProps: GetServerSideProps<CheckoutProps> = async (cont
     const products = productsRes.ok ? await productsRes.json() : [];
 
     return { props: { customer, products } };
-  } catch (error: any) {
-    return { props: { customer: null, products: [], error: error.message } };
+  } catch (error: unknown) {
+    return { props: { customer: null, products: [], error: error instanceof Error ? error.message : String(error) } };
   }
 };
 
@@ -82,71 +81,58 @@ export default function Checkout({ customer, error }: CheckoutProps) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await res.json();
       setPaymentStatus('success');
-    } catch (err: any) {
+    } catch (err: unknown) {
       setPaymentStatus('error');
-      setPaymentError(err.message);
+      setPaymentError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  if (error) return <div>Error loading checkout data: {error}</div>;
+  if (error) return <div className="error-state" role="alert"><span>!</span><div><strong>Checkout data could not be loaded</strong><p>{error}. Confirm the demo API is running on port 4001.</p></div></div>;
 
   return (
-    <div>
-      <h2>Checkout</h2>
+    <div className="checkout-page">
+      <div className="checkout-heading"><span className="eyebrow">CUSTOMER JOURNEY · STEP 2 OF 2</span><h1>Review and complete checkout</h1><p>This flow produces server-side and browser requests for tracing, mocking, and recovery testing.</p></div>
+      <div className="checkout-grid"><section className="checkout-main" aria-labelledby="order-heading">
       {customer && (
-        <div style={{ marginBottom: '1rem', padding: '1rem', backgroundColor: '#f3f4f6', borderRadius: '4px' }}>
-          <h3>Customer Details</h3>
-          <p>{customer.name} ({customer.email})</p>
+        <div className="customer-card">
+          <span className="avatar" aria-hidden="true">{customer.name.slice(0, 1)}</span><div><small>Ordering for</small><strong>{customer.name}</strong><span>{customer.email}</span></div><span className="verified">Verified</span>
         </div>
       )}
       
       {cart && (
-        <div style={{ marginBottom: '1rem', padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '4px' }}>
-          <h3>Order Summary</h3>
-          <ul style={{ listStyle: 'none', padding: 0 }}>
+        <div className="order-card">
+          <div className="card-heading"><div><span className="eyebrow">YOUR ORDER</span><h2 id="order-heading">Order summary</h2></div><span>{cart.items.length} items</span></div>
+          <ul className="order-list">
             {cart.items.map(item => (
-              <li key={item.productId} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0' }}>
-                <span>{item.name} x {item.quantity}</span>
-                <span>${(item.price * item.quantity).toFixed(2)}</span>
+              <li key={item.productId}><span className="item-icon" aria-hidden="true">{item.name.slice(0,1)}</span><div><strong>{item.name}</strong><small>Quantity {item.quantity}</small></div><strong>${(item.price * item.quantity).toFixed(2)}</strong>
               </li>
             ))}
           </ul>
-          <hr />
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
+          <div className="order-total">
             <span>Total</span>
             <span>${cart.total.toFixed(2)}</span>
           </div>
         </div>
       )}
 
+      </section><aside className="payment-card"><span className="eyebrow">SECURE DEMO PAYMENT</span><h2>Complete test payment</h2><p>No real payment or customer data is transmitted in this local experience.</p>
       {paymentStatus === 'success' ? (
-        <div style={{ color: 'green', padding: '1rem', backgroundColor: '#dcfce7', borderRadius: '4px' }}>
-          Payment successful! Thank you for your order.
+        <div className="success-state" role="status"><span>✓</span><strong>Payment simulation successful</strong><p>The journey is ready to review in ApiLens.</p><a className="button secondary" href="/">Return to products</a>
         </div>
       ) : (
         <button 
+          className="button primary pay-button"
           onClick={handlePay} 
           disabled={paymentStatus === 'processing'}
-          style={{
-            backgroundColor: '#2563eb',
-            color: 'white',
-            padding: '1rem 2rem',
-            border: 'none',
-            borderRadius: '4px',
-            fontSize: '1.1rem',
-            cursor: paymentStatus === 'processing' ? 'wait' : 'pointer',
-            width: '100%'
-          }}
         >
           {paymentStatus === 'processing' ? 'Processing...' : `Pay $${cart?.total.toFixed(2) || '0.00'}`}
         </button>
       )}
 
       {paymentStatus === 'error' && (
-        <div style={{ color: 'red', marginTop: '1rem', padding: '1rem', backgroundColor: '#fee2e2', borderRadius: '4px' }}>
-          Payment failed: {paymentError}
+        <div className="payment-error" role="alert"><strong>Payment failed</strong><span>{paymentError}. Review the failed request in ApiLens, then retry.</span>
         </div>
-      )}
+      )}<div className="payment-meta"><span>Local only</span><span>Redaction enabled</span><span>Evidence ready</span></div></aside></div>
     </div>
   );
 }

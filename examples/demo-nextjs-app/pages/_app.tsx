@@ -1,24 +1,32 @@
 import type { AppProps } from 'next/app';
 import Head from 'next/head';
+import Link from 'next/link';
+import { useRouter } from 'next/router';
+import '../styles/globals.css';
+import '../styles/checkout.css';
 
 export default function App({ Component, pageProps }: AppProps) {
+  const router = useRouter();
   return (
     <>
       <Head>
         <title>ApiLens Demo App</title>
         <meta name="description" content="Demo Application for ApiLens" />
       </Head>
-      <div style={{ fontFamily: 'system-ui, sans-serif', margin: 0, padding: 0 }}>
-        <header style={{ backgroundColor: '#2563eb', color: 'white', padding: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h1 style={{ margin: 0, fontSize: '1.5rem' }}>ApiLens Store</h1>
-          <nav>
-            <a href="/" style={{ color: 'white', marginRight: '1rem', textDecoration: 'none' }}>Home</a>
-            <a href="/checkout" style={{ color: 'white', textDecoration: 'none' }}>Checkout</a>
+      <div className="site-shell">
+        <a className="skip-link" href="#main-content">Skip to main content</a>
+        <header className="site-header">
+          <Link href="/" className="brand" aria-label="ApiLens Store home"><span className="brand-mark" aria-hidden="true">A</span><span><strong>ApiLens</strong><small>Experience Lab</small></span></Link>
+          <nav aria-label="Primary navigation">
+            <Link href="/" aria-current={router.pathname === '/' ? 'page' : undefined}>Products</Link>
+            <Link href="/checkout" aria-current={router.pathname === '/checkout' ? 'page' : undefined}>Checkout <span className="nav-count">2</span></Link>
           </nav>
+          <div className="lab-status"><span aria-hidden="true" />QA environment</div>
         </header>
-        <main style={{ padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
+        <main id="main-content" className="site-main" tabIndex={-1}>
           <Component {...pageProps} />
         </main>
+        <footer><span>ApiLens Experience Lab</span><span>Safe environment for capture, tracing and failure testing</span></footer>
       </div>
     </>
   );

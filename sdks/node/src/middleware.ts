@@ -2,12 +2,10 @@ import type { Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { runWithContext, TraceContext } from './context';
 import { TraceReporter } from './trace-reporter';
-import { TraceSpan, SpanSource } from '@apilens/shared-types';
-import type { CapturedRequest, Rule } from '@apilens/shared-types';
-import { RuleExecutor, RuleMatcher } from '@apilens/rule-engine';
-
-const ruleMatcher = new RuleMatcher();
-const ruleExecutor = new RuleExecutor();
+import type { RequestMethod, Rule, TraceSpan } from '@apilens/shared-types';
+import { captureBody, createCapturedRequest } from '@apilens/core';
+import { executeAction, findMatchingRule } from '@apilens/mock-engine';
+import { redactHeaders } from './redaction';
 
 function decodeRules(value: string | undefined): Rule[] {
   if (!value) return [];
@@ -68,46 +66,61 @@ export function apiLensMiddleware(options: MiddlewareOptions) {
     if (scenarioId) res.setHeader('x-test-scenario-id', scenarioId);
     res.setHeader('traceparent', newTraceparent);
 
+    const requestUrl = `${req.protocol || 'http'}://${typeof req.get === 'function' ? req.get('host') : (req.headers.host || 'localhost')}${req.originalUrl || req.url || '/'}`;
+    const requestHeaders = Object.fromEntries(
+      Object.entries(req.headers).flatMap(([name, value]) => value === undefined ? [] : [[name, Array.isArray(value) ? value.join(', ') : value]]),
+    );
+    const requestBodyText = req.body === undefined || req.body === null ? null : JSON.stringify(req.body);
     const requestForRules = {
-      url: `${req.protocol || 'http'}://${typeof req.get === 'function' ? req.get('host') : (req.headers.host || 'localhost')}${req.originalUrl || req.url || '/'}`,
+      ...createCapturedRequest({
+        sessionId,
+        url: requestUrl,
+        method: req.method.toUpperCase() as RequestMethod,
+        channel: 'server-sdk',
+        source: 'internal-service',
+        originId: options.serviceName,
+      }),
       path: req.path || req.url || '/',
       hostname: req.hostname || req.headers.host || 'localhost',
-      method: req.method,
-      queryParams: req.query,
-      requestHeaders: req.headers,
-      requestBody: req.body ? JSON.stringify(req.body) : null,
+      queryParams: Object.fromEntries(Object.entries(req.query ?? {}).map(([name, value]) => [name, String(value)])),
+      requestHeaders,
+      requestBody: captureBody(requestBodyText, { maxBytes: 256 * 1024, mimeType: req.get?.('content-type') ?? 'application/json' }),
       serviceName: options.serviceName,
-      statusCode: null
-    } as unknown as CapturedRequest;
-    const match = ruleMatcher.findMatchingRule(rules, requestForRules);
+    };
+    const match = findMatchingRule(rules, requestForRules);
 
     runWithContext({ sessionId, scenarioId, rules, traceContext }, () => {
       res.on('finish', () => {
         const duration = Date.now() - startTime;
         
         const span: TraceSpan = {
-          id: spanId,
           traceId,
           spanId,
           parentSpanId: parentSpanId || null,
           sessionId,
           serviceName: options.serviceName,
           operationName: `${req.method} ${req.path}`,
+          kind: 'server',
+          channel: 'server-sdk',
           method: req.method,
           url: req.originalUrl || req.url,
           statusCode: res.statusCode,
+          status: res.statusCode >= 400 ? 'error' : 'ok',
           startedAt: startTime,
           endedAt: Date.now(),
           durationMs: duration,
           source: 'internal-service',
           attributes: {
             mocked: Boolean(match.matched),
-            requestHeaders: JSON.stringify(req.headers),
-            responseHeaders: JSON.stringify(res.getHeaders())
+            scenario: match.rule?.name ?? '',
+            requestHeaders: JSON.stringify(redactHeaders(requestHeaders)),
+            responseHeaders: JSON.stringify(redactHeaders(Object.fromEntries(
+              Object.entries(res.getHeaders()).map(([name, value]) => [name, Array.isArray(value) ? value.join(', ') : String(value)]),
+            )))
           },
           events: [],
           error: res.statusCode >= 500 ? `HTTP ${res.statusCode}` : null,
-          scenarioApplied: match.rule?.name || null
+          mockedBy: match.rule?.name ?? null,
         };
 
         reporter.addSpan(span);
@@ -118,7 +131,7 @@ export function apiLensMiddleware(options: MiddlewareOptions) {
         return;
       }
 
-      const mock = ruleExecutor.executeAction(match.action);
+      const mock = executeAction(match.action, { ruleName: match.rule.name });
       match.rule.appliedCount = (match.rule.appliedCount || 0) + 1;
       const sendMock = () => {
         Object.entries(mock.headers).forEach(([name, value]) => res.setHeader(name, String(value)));

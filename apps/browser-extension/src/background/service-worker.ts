@@ -1,412 +1,151 @@
-import { CapturedRequest, RequestType, RequestMethod, Rule } from '@apilens/shared-types';
-import { extensionApi as api } from '../shared/browser-api';
-import { ChromiumNetworkMock } from './chromium-network-mock';
-import { isTopFrameSynchronized, revisionForRules } from '../shared/interceptor-health';
+import type {
+  ApiCatalog,
+  Bookmark,
+  CapturedRequest,
+  ContractSet,
+  EvidenceScenario,
+  RequestMethod,
+  RequestType,
+  ResponseAssertion,
+  Rule,
+} from '@apilens/shared-types';
+import {
+  completeRequest,
+  createCapturedRequest,
+  createId,
+  isStaticAssetPath,
+  normalizeHeaders,
+  parseUrl,
+  resolveEnvironment,
+} from '@apilens/core';
+import { describeMockingStatus } from '@apilens/mock-engine';
+import { redactRequest } from '@apilens/security';
+import { enrichWithTraceContext, requestToSpan } from '@apilens/trace-engine';
+import { buildCatalog } from '@apilens/insights';
+import { buildEvidenceBundle, renderArtifacts } from '@apilens/evidence';
+import { executeReplay } from '@apilens/replay-engine';
+import { EXTENSION_VERSION, extensionApi, sendRuntimeMessage, sendTabMessage } from '../shared/browser-api';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, type ExtensionSettings } from '../shared/settings';
+import { isTopFrameSynchronized, revisionForRules, type MockEngineHealth } from '../shared/engine-health';
+import type { PageHookStatus, PanelEvent, PanelRequest, PanelResponse, PanelState } from '../shared/messages';
+import { CaptureStore } from './capture-store';
+import { AgentClient } from './agent-client';
+import { ChromiumNetworkMock } from './network-mock';
+import { RecentRequestBuffer } from './recent-request-buffer';
 
-const MAX_REQUESTS = 1000;
-let sessionId = '';
-let isRecording = true;
-let activeRules: Rule[] = [];
-let activeRulesRevision = revisionForRules(activeRules);
-let serverIntegrationEnabled = false;
-const serverTraceIds = new Set<string>();
-const interceptorStatusByTab = new Map<number, Map<number, any>>();
-const interceptorErrorsByTab = new Map<number, string>();
-const lastInterceptorRepairAtByTab = new Map<number, number>();
-const interceptorSelfTestByTab = new Map<number, any>();
-const mockedNetworkRequestIds = new Set<string>();
-let traceSocket: WebSocket | null = null;
-let traceReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let traceHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+const RULES_KEY = 'apilens.rules.v1';
+const BOOKMARKS_KEY = 'apilens.bookmarks.v1';
+const ASSERTIONS_KEY = 'apilens.assertions.v1';
+const CONTRACTS_KEY = 'apilens.contracts.v1';
+const HEALTH_ALARM = 'apilens-engine-health';
+const RETENTION_ALARM = 'apilens-retention';
 
-// Store requests by tabId
-const requestsByTab: Map<number, CapturedRequest[]> = new Map();
-// Active pending requests
-const activeRequests: Map<string, CapturedRequest> = new Map();
-const chromiumNetworkMock = new ChromiumNetworkMock(
-  () => activeRules,
-  (tabId, request, rule, networkRequestId) => recordNetworkMock(tabId, request, rule, networkRequestId)
+let settings: ExtensionSettings = DEFAULT_SETTINGS;
+let rules: Rule[] = [];
+let ruleRevision = revisionForRules(rules);
+
+const frameStatus = new Map<number, Map<number, PageHookStatus>>();
+const engineErrors = new Map<number, string>();
+const selfTests = new Map<number, { ok: boolean; error?: string; testedAt: number }>();
+const consoleMessages = new Map<number, Array<{ level: 'error' | 'warning' | 'info'; text: string; timestamp: number; url: string | null }>>();
+const inFlight = new Map<string, CapturedRequest>();
+const mockedNetworkIds = new Set<string>();
+const recentRequests = new RecentRequestBuffer();
+
+const store = new CaptureStore({
+  onRequests: (sessionId, requests) => {
+    agent.pushRequests(sessionId, requests);
+  },
+  onSpans: (_sessionId, spans) => broadcast({ type: 'event:spans', spans }),
+});
+
+const agent = new AgentClient({
+  onSpans: (_sessionId, spans) => {
+    store.addSpans(spans);
+  },
+  onRequests: (_sessionId, requests) => {
+    // Requests observed by the agent's QA proxy — server-side traffic the
+    // browser could never see on its own.
+    const stored = store.addRequests(requests);
+    if (stored.length) broadcast({ type: 'event:requests', tabId: null, requests: stored });
+  },
+  onStatusChange: (status) => broadcast({ type: 'event:agent', agent: status }),
+});
+
+const networkMock = new ChromiumNetworkMock(
+  () => rules,
+  () => settings.environments,
+  {
+    onMockedRequest: (tabId, request, networkRequestId) => {
+      mockedNetworkIds.add(networkRequestId);
+      setTimeout(() => mockedNetworkIds.delete(networkRequestId), 30_000);
+      ingest(tabId, request);
+    },
+    log: (message) => console.warn(`ApiLens: ${message}`),
+  },
 );
 
-function generateId() {
-  return crypto.randomUUID();
-}
-
-function replaceActiveRules(rules: Rule[]) {
-  activeRules = rules;
-  activeRulesRevision = revisionForRules(rules);
-}
-
-function getSessionId() {
-  if (!sessionId) {
-    sessionId = generateId();
-    chrome.storage.session?.set({ sessionId });
-  }
-  return sessionId;
-}
-
-// Load initial state
-chrome.storage.session?.get(['sessionId'], (res) => {
-  if (res && res.sessionId) {
-    sessionId = res.sessionId;
-  } else {
-    getSessionId();
-  }
-  setupNetRequestRules();
-  if (serverIntegrationEnabled) connectTraceGateway();
+const initialization = Promise.all([loadSettings(), loadRules(), store.restore()]).then(([loadedSettings, loadedRules, session]) => {
+  settings = loadedSettings;
+  rules = loadedRules;
+  ruleRevision = revisionForRules(rules);
+  if (session) agent.setSessionId(session.id);
+  if (settings.agent.enabled) agent.connect(settings.agent, session?.id ?? null);
 });
 
-function connectTraceGateway() {
-  if (!serverIntegrationEnabled || !sessionId || traceSocket?.readyState === WebSocket.OPEN || traceSocket?.readyState === WebSocket.CONNECTING) return;
+/* ------------------------------------------------------------------ */
+/* Persistence helpers                                                 */
+/* ------------------------------------------------------------------ */
 
-  chrome.storage.local.get(['traceGatewayUrl'], result => {
-    const baseUrl = String(result.traceGatewayUrl || 'ws://localhost:3002').replace(/\/$/, '');
-    traceSocket = new WebSocket(`${baseUrl}/ws/sessions/${encodeURIComponent(getSessionId())}`);
-
-    traceSocket.onopen = () => {
-      if (traceReconnectTimer) clearTimeout(traceReconnectTimer);
-      traceReconnectTimer = null;
-      if (traceHeartbeatTimer) clearInterval(traceHeartbeatTimer);
-      traceHeartbeatTimer = setInterval(() => {
-        if (traceSocket?.readyState === WebSocket.OPEN) traceSocket.send('ping');
-      }, 20_000);
-    };
-
-    traceSocket.onmessage = event => {
-      try {
-        const message = JSON.parse(String(event.data));
-        if (message.type !== 'traces_update') return;
-        const spans = Array.isArray(message.data) ? message.data : [message.data];
-        spans.forEach(addServerTrace);
-      } catch (error) {
-        console.error('ApiLens could not parse a server trace:', error);
-      }
-    };
-
-    traceSocket.onclose = () => {
-      traceSocket = null;
-      if (traceHeartbeatTimer) clearInterval(traceHeartbeatTimer);
-      traceHeartbeatTimer = null;
-      if (serverIntegrationEnabled) traceReconnectTimer = setTimeout(connectTraceGateway, 3_000);
-    };
-
-    traceSocket.onerror = () => traceSocket?.close();
-  });
+async function loadRules(): Promise<Rule[]> {
+  const stored = await extensionApi.storage.local.get(RULES_KEY);
+  const value = stored[RULES_KEY];
+  return Array.isArray(value) ? (value as Rule[]) : [];
 }
 
-function disconnectTraceGateway() {
-  if (traceReconnectTimer) clearTimeout(traceReconnectTimer);
-  if (traceHeartbeatTimer) clearInterval(traceHeartbeatTimer);
-  traceReconnectTimer = null;
-  traceHeartbeatTimer = null;
-  traceSocket?.close();
-  traceSocket = null;
+async function persistRules(next: Rule[]): Promise<void> {
+  rules = next;
+  ruleRevision = revisionForRules(next);
+  await extensionApi.storage.local.set({ [RULES_KEY]: next });
 }
 
-function addServerTrace(span: any) {
-  const id = String(span.id || span.spanId || generateId());
-  if (serverTraceIds.has(id)) return;
-  serverTraceIds.add(id);
-  if (serverTraceIds.size > MAX_REQUESTS * 2) {
-    const oldest = serverTraceIds.values().next().value;
-    if (oldest) serverTraceIds.delete(oldest);
+async function readList<T>(key: string): Promise<T[]> {
+  const stored = await extensionApi.storage.local.get(key);
+  const value = stored[key];
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+/* ------------------------------------------------------------------ */
+/* Capture pipeline                                                    */
+/* ------------------------------------------------------------------ */
+
+function ingest(tabId: number, request: CapturedRequest): void {
+  const enriched = enrichWithTraceContext(request, settings.traceHeaders);
+  const environment = resolveEnvironment(enriched.hostname, settings.environments);
+  const withEnvironment: CapturedRequest = { ...enriched, environmentId: environment.id, originId: String(tabId) };
+
+  if (!settings.capture.captureStaticAssets && (withEnvironment.type === 'static' || isStaticAssetPath(withEnvironment.path))) {
+    return;
   }
 
-  const rawUrl = String(span.url || span.attributes?.url || 'server://unknown');
-  let hostname = String(span.serviceName || 'server');
-  let path = rawUrl;
-  try {
-    const parsed = new URL(rawUrl, 'http://server.local');
-    hostname = parsed.hostname === 'server.local' ? hostname : parsed.hostname;
-    path = parsed.pathname + parsed.search;
-  } catch (_) {
-    // Keep the operation name as the visible path for non-URL spans.
-  }
+  // Redaction runs before anything is stored, broadcast or exported.
+  const safe = redactRequest(withEnvironment, settings.redaction);
+  recentRequests.add(tabId, safe);
+  broadcast({ type: 'event:requests', tabId, requests: [safe] });
+  const stored = store.addRequests([safe]);
+  if (stored.length === 0) return;
 
-  const startedAt = Number(span.startedAt ?? span.startTime ?? Date.now());
-  const durationMs = Number(span.durationMs ?? span.duration ?? 0);
-  const source = ['frontend-server', 'bff', 'gateway', 'internal-service'].includes(span.source)
-    ? span.source
-    : 'frontend-server';
-  const request: CapturedRequest = {
-    id: `server-${id}`,
-    sessionId: String(span.sessionId || getSessionId()),
-    source,
-    type: 'fetch',
-    method: String(span.method || 'GET').toUpperCase() as RequestMethod,
-    url: rawUrl,
-    path: path || String(span.operationName || span.name || 'server request'),
-    hostname,
-    queryParams: {},
-    requestHeaders: span.requestHeaders || {},
-    responseHeaders: span.responseHeaders || {},
-    requestBody: null,
-    responseBody: null,
-    statusCode: Number(span.statusCode ?? span.status ?? 0) || null,
-    durationMs,
-    startedAt,
-    completedAt: Number(span.endedAt ?? (startedAt + durationMs)),
-    traceId: span.traceId || null,
-    spanId: span.spanId || id,
-    parentSpanId: span.parentSpanId || span.parentId || null,
-    serviceName: span.serviceName || null,
-    scenarioApplied: span.scenarioApplied || null,
-    error: span.error || null,
-    isClientSide: false,
-    graphqlOperation: null,
-    graphqlOperationType: null
-  };
-
-  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
-    const tabId = tabs[0]?.id;
-    if (tabId) saveRequest(tabId, request);
-  });
-}
-
-chrome.storage.local.get(['isRecording', 'apilens_rules', 'serverIntegrationEnabled'], (res) => {
-  if (res && res.isRecording !== undefined) {
-    isRecording = res.isRecording;
-  }
-  if (res && Array.isArray(res.apilens_rules)) {
-    replaceActiveRules(res.apilens_rules);
-  }
-  serverIntegrationEnabled = Boolean(res?.serverIntegrationEnabled);
-  if (serverIntegrationEnabled) connectTraceGateway();
-  setupNetRequestRules();
-  ensurePageInterceptors();
-});
-
-// React to storage changes live
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === 'local') {
-    if (changes.isRecording) {
-      isRecording = changes.isRecording.newValue;
-    }
-    if (changes.apilens_rules) {
-      replaceActiveRules(changes.apilens_rules.newValue || []);
-      setupNetRequestRules();
-      broadcastRules();
-    }
-    if (changes.serverIntegrationEnabled) {
-      serverIntegrationEnabled = Boolean(changes.serverIntegrationEnabled.newValue);
-      setupNetRequestRules();
-      if (serverIntegrationEnabled) connectTraceGateway();
-      else disconnectTraceGateway();
-    }
-  }
-});
-
-async function broadcastRules(targetTabId?: number) {
-  const tabs = await api.tabs.query({});
-  await Promise.all(tabs
-    .filter(tab => tab.id && (!targetTabId || tab.id === targetTabId))
-    .map(tab => api.tabs.sendMessage(tab.id!, {
-      type: 'RULES_UPDATED',
-      rules: activeRules,
-      revision: activeRulesRevision
-    }).catch(() => undefined)));
-}
-
-async function ensureWorkingMockEngine(tabId: number) {
-  await ensurePageInterceptors(tabId);
-  await broadcastRules(tabId);
-  let health = await waitForInterceptorHealth(tabId);
-
-  // Strict CSP and page hardening can prevent MAIN-world hooks. Chromium has a
-  // browser-level Fetch interceptor that can still return the configured mock.
-  if (!health.installed) {
-    const network = await chromiumNetworkMock.enable(tabId);
-    if (!network.active && network.error) interceptorErrorsByTab.set(tabId, network.error);
-    health = getInterceptorHealth(tabId);
-  }
-  return health;
-}
-
-async function ensurePageInterceptors(targetTabId?: number) {
-  const tabs = await api.tabs.query({});
-  const eligibleTabs = tabs.filter(tab =>
-    tab.id && (!targetTabId || tab.id === targetTabId) && /^https?:/i.test(tab.url || '')
-  );
-  await Promise.all(eligibleTabs.map(async tab => {
-    try {
-      interceptorErrorsByTab.delete(tab.id!);
-      // The top page is the critical hook target. Inject it independently so a
-      // restricted/sandboxed child frame cannot make the whole repair fail.
-      await api.scripting.executeScript({
-        target: { tabId: tab.id! },
-        world: 'MAIN',
-        files: ['content/page-interceptor.js']
-      });
-      await api.scripting.executeScript({
-        target: { tabId: tab.id! },
-        world: 'ISOLATED',
-        files: ['content/content-script.js']
-      });
-    } catch (error) {
-      interceptorErrorsByTab.set(tab.id!, error instanceof Error ? error.message : String(error));
-      console.warn(`ApiLens could not install the interceptor in tab ${tab.id}:`, error);
-      return;
-    }
-
-    // Static manifest scripts handle frames during normal navigation. This
-    // best-effort pass repairs existing child frames without affecting top-frame health.
-    try {
-      await api.scripting.executeScript({
-        target: { tabId: tab.id!, allFrames: true },
-        world: 'MAIN',
-        files: ['content/page-interceptor.js']
-      });
-      await api.scripting.executeScript({
-        target: { tabId: tab.id!, allFrames: true },
-        world: 'ISOLATED',
-        files: ['content/content-script.js']
-      });
-    } catch (error) {
-      console.debug(`ApiLens skipped one or more restricted child frames in tab ${tab.id}:`, error);
-    }
-  }));
-}
-
-function getInterceptorHealth(tabId: number) {
-  const enabledRuleCount = activeRules.filter(rule => rule.enabled).length;
-  const frameMap = interceptorStatusByTab.get(tabId);
-  const frames = frameMap
-    ? [...frameMap.entries()]
-      .map(([frameId, status]) => ({ frameId, ...status }))
-      .filter(status => Date.now() - Number(status.updatedAt || 0) < 45_000)
-    : [];
-  const topFrame = frames.find(frame => frame.frameId === 0);
-  const hooksInstalled = Boolean(topFrame?.installed && topFrame.fetchPatched && topFrame.xhrPatched);
-  const pageRulesSynced = isTopFrameSynchronized(topFrame, enabledRuleCount, activeRulesRevision);
-  const networkMockActive = chromiumNetworkMock.isActive(tabId);
-  const rulesSynced = pageRulesSynced || networkMockActive;
-  const pageInstalled = hooksInstalled && pageRulesSynced;
-  return {
-    installed: pageInstalled || networkMockActive,
-    hooksInstalled,
-    rulesSynced,
-    engine: pageInstalled ? 'page' : networkMockActive ? 'chromium-network' : 'none',
-    networkMockActive,
-    frames,
-    enabledRuleCount,
-    expectedRulesRevision: activeRulesRevision,
-    selfTest: interceptorSelfTestByTab.get(tabId) || null,
-    error: pageInstalled || networkMockActive ? null : interceptorErrorsByTab.get(tabId) || chromiumNetworkMock.error(tabId) || null
-  };
-}
-
-async function waitForInterceptorHealth(tabId: number, timeoutMs = 1_500) {
-  const deadline = Date.now() + timeoutMs;
-  let health = getInterceptorHealth(tabId);
-  while (!health.installed && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-    health = getInterceptorHealth(tabId);
-  }
-  return health;
-}
-
-async function runInterceptorSelfTest(tabId: number) {
-  try {
-    const result = await api.tabs.sendMessage(tabId, { type: 'RUN_INTERCEPTOR_SELF_TEST' });
-    const normalized = result?.ok ? result : { ok: false, ...result, error: result?.error || 'The mock engine self-test failed.' };
-    interceptorSelfTestByTab.set(tabId, normalized);
-    return normalized;
-  } catch (error) {
-    const result = { ok: false, error: error instanceof Error ? error.message : String(error), testedAt: Date.now() };
-    interceptorSelfTestByTab.set(tabId, result);
-    return result;
-  }
-}
-
-async function runMockEngineSelfTest(tabId: number) {
-  const health = getInterceptorHealth(tabId);
-  if (health.engine === 'chromium-network') {
-    const result = await chromiumNetworkMock.selfTest(tabId);
-    interceptorSelfTestByTab.set(tabId, result);
-    return result;
-  }
-  return runInterceptorSelfTest(tabId);
-}
-
-chrome.alarms.create('apilens-interceptor-health', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name !== 'apilens-interceptor-health' || !activeRules.some(rule => rule.enabled)) return;
-  chrome.tabs.query({ active: true }, tabs => {
-    tabs.filter(tab => tab.id && /^https?:/i.test(tab.url || '')).forEach(tab => {
-      void ensureWorkingMockEngine(tab.id!);
-    });
-  });
-});
-
-function toBase64(value: string) {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  bytes.forEach(byte => { binary += String.fromCharCode(byte); });
-  return btoa(binary);
-}
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && /^https?:/i.test(tab.url || '')) {
-    interceptorStatusByTab.delete(tabId);
-    interceptorSelfTestByTab.delete(tabId);
-    void ensureWorkingMockEngine(tabId);
-  }
-});
-
-function setupNetRequestRules() {
-  chrome.storage.local.get(['serverIntegrationEnabled'], settings => {
-    const dnr = api.declarativeNetRequest;
-    if (!dnr?.updateDynamicRules) return;
-    try {
-      if (!settings.serverIntegrationEnabled) {
-        void dnr.updateDynamicRules({ removeRuleIds: [1] }).catch(error => {
-          console.error('ApiLens could not remove server-integration headers:', error);
-        });
-        return;
-      }
-      const requestHeaders: chrome.declarativeNetRequest.ModifyHeaderInfo[] = [
-        { header: 'X-QA-Session-ID', operation: chrome.declarativeNetRequest.HeaderOperation.SET, value: getSessionId() }
-      ];
-      const enabledRules = activeRules.filter(rule => rule.enabled);
-      if (enabledRules.length > 0) {
-        requestHeaders.push({
-          header: 'X-ApiLens-Rules',
-          operation: chrome.declarativeNetRequest.HeaderOperation.SET,
-          value: toBase64(JSON.stringify(enabledRules))
-        });
-      }
-      void dnr.updateDynamicRules({
-        removeRuleIds: [1],
-        addRules: [{
-          id: 1,
-          priority: 1,
-          action: {
-            type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
-            requestHeaders
-          },
-          condition: {
-            urlFilter: '*',
-            resourceTypes: Object.values(chrome.declarativeNetRequest.ResourceType)
-          }
-        }]
-      }).catch(error => {
-        console.error('ApiLens could not install server-integration headers:', error);
-      });
-    } catch (e) {
-      console.error('DeclarativeNetRequest rule set error:', e);
-    }
-  });
+  // A browser request only becomes a span once it has trace identity; the
+  // projection keeps browser and server telemetry in one model.
+  store.addSpans([requestToSpan(stored[0]!)]);
 }
 
 function mapResourceType(type: string): RequestType {
   switch (type) {
     case 'xmlhttprequest':
-    case 'xhr':
-    case 'fetch':
-      return 'fetch';
+      return 'xhr';
     case 'main_frame':
     case 'sub_frame':
-    case 'document':
       return 'navigation';
     case 'stylesheet':
     case 'script':
@@ -416,324 +155,626 @@ function mapResourceType(type: string): RequestType {
       return 'static';
     case 'websocket':
       return 'websocket';
+    case 'ping':
+      return 'beacon';
     default:
       return 'other';
   }
 }
 
-chrome.webRequest.onBeforeRequest.addListener(
+/**
+ * `webRequest` sees every request the browser makes, including ones the page
+ * hooks cannot reach (service workers, preloads, navigations). It cannot read
+ * bodies, so it complements rather than replaces the page hooks.
+ */
+extensionApi.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (!isRecording) return;
-    if (details.tabId < 0) return;
-    
-    try {
-      const url = new URL(details.url);
-      const queryParams: Record<string, string> = {};
-      url.searchParams.forEach((val, key) => queryParams[key] = val);
-
-      const req: CapturedRequest = {
-        id: details.requestId,
-        sessionId: getSessionId(),
+    if (!store.isRecording() || details.tabId < 0) return;
+    const parsed = parseUrl(details.url);
+    inFlight.set(details.requestId, {
+      ...createCapturedRequest({
+        sessionId: '',
+        url: details.url,
+        method: (details.method || 'GET').toUpperCase() as RequestMethod,
+        channel: 'browser-network',
         source: 'browser',
         type: mapResourceType(details.type),
-        method: details.method as RequestMethod,
-        url: details.url,
-        path: url.pathname,
-        hostname: url.hostname,
-        queryParams,
-        requestHeaders: {},
-        responseHeaders: {},
-        requestBody: null,
-        responseBody: null,
-        statusCode: null,
-        durationMs: null,
-        startedAt: Date.now(),
-        completedAt: null,
-        traceId: null,
-        spanId: null,
-        parentSpanId: null,
-        serviceName: null,
-        scenarioApplied: null,
-        error: null,
-        isClientSide: true,
-        graphqlOperation: null,
-        graphqlOperationType: null
-      };
-
-      activeRequests.set(details.requestId, req);
-    } catch (e) {
-      console.error('Error parsing request:', e);
-    }
-  },
-  { urls: ['<all_urls>'] }
-);
-
-chrome.webRequest.onSendHeaders.addListener(
-  (details) => {
-    const req = activeRequests.get(details.requestId);
-    if (req && details.requestHeaders) {
-      details.requestHeaders.forEach(h => {
-        if (h.name && h.value) req.requestHeaders[h.name.toLowerCase()] = h.value;
-      });
-    }
+        originId: String(details.tabId),
+        startedAt: details.timeStamp,
+      }),
+      hostname: parsed.hostname,
+      initiator: (details as { initiator?: string }).initiator ?? null,
+    });
   },
   { urls: ['<all_urls>'] },
-  ['requestHeaders']
 );
 
-chrome.webRequest.onHeadersReceived.addListener(
+extensionApi.webRequest.onSendHeaders.addListener(
   (details) => {
-    const req = activeRequests.get(details.requestId);
-    if (req && details.responseHeaders) {
-      details.responseHeaders.forEach(h => {
-        if (h.name && h.value) req.responseHeaders[h.name.toLowerCase()] = h.value;
-      });
-      req.statusCode = details.statusCode;
-    }
+    const record = inFlight.get(details.requestId);
+    if (!record || !details.requestHeaders) return;
+    inFlight.set(details.requestId, {
+      ...record,
+      requestHeaders: normalizeHeaders(Object.fromEntries(details.requestHeaders.map((header) => [header.name, header.value ?? '']))),
+    });
   },
   { urls: ['<all_urls>'] },
-  ['responseHeaders']
+  ['requestHeaders'],
 );
 
-chrome.webRequest.onCompleted.addListener(
+extensionApi.webRequest.onHeadersReceived.addListener(
   (details) => {
-    if (mockedNetworkRequestIds.delete(details.requestId)) {
-      activeRequests.delete(details.requestId);
-      return;
-    }
-    const req = activeRequests.get(details.requestId);
-    if (req) {
-      req.completedAt = Date.now();
-      req.durationMs = req.completedAt - req.startedAt;
-      req.statusCode = details.statusCode;
-      
-      saveRequest(details.tabId, req);
-      activeRequests.delete(details.requestId);
-    }
+    const record = inFlight.get(details.requestId);
+    if (!record || !details.responseHeaders) return;
+    inFlight.set(details.requestId, {
+      ...record,
+      responseHeaders: normalizeHeaders(Object.fromEntries(details.responseHeaders.map((header) => [header.name, header.value ?? '']))),
+      statusCode: details.statusCode,
+    });
   },
-  { urls: ['<all_urls>'] }
+  { urls: ['<all_urls>'] },
+  ['responseHeaders'],
 );
 
-chrome.webRequest.onErrorOccurred.addListener(
+extensionApi.webRequest.onCompleted.addListener(
   (details) => {
-    if (mockedNetworkRequestIds.delete(details.requestId)) {
-      activeRequests.delete(details.requestId);
-      return;
-    }
-    const req = activeRequests.get(details.requestId);
-    if (req) {
-      req.completedAt = Date.now();
-      req.durationMs = req.completedAt - req.startedAt;
-      req.error = details.error;
-      
-      saveRequest(details.tabId, req);
-      activeRequests.delete(details.requestId);
-    }
+    const record = inFlight.get(details.requestId);
+    inFlight.delete(details.requestId);
+    if (!record) return;
+    // The page hooks already reported this one with far richer detail.
+    if (mockedNetworkIds.delete(details.requestId)) return;
+    if (record.type === 'fetch' || record.type === 'xhr') return;
+    ingest(details.tabId, completeRequest(record, { statusCode: details.statusCode, completedAt: details.timeStamp }));
   },
-  { urls: ['<all_urls>'] }
+  { urls: ['<all_urls>'] },
 );
 
-function saveRequest(tabId: number, req: CapturedRequest) {
-  let list = requestsByTab.get(tabId) || [];
-  list.push(req);
-  if (list.length > MAX_REQUESTS) {
-    list = list.slice(-MAX_REQUESTS);
-  }
-  requestsByTab.set(tabId, list);
-  
-  // Broadcast to Popup and DevTools
-  api.runtime.sendMessage({ type: 'NEW_REQUEST', request: req, tabId }).catch(() => {});
+extensionApi.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    const record = inFlight.get(details.requestId);
+    inFlight.delete(details.requestId);
+    if (!record) return;
+    if (mockedNetworkIds.delete(details.requestId)) return;
+    ingest(details.tabId, completeRequest(record, { statusCode: null, error: details.error, completedAt: details.timeStamp }));
+  },
+  { urls: ['<all_urls>'] },
+);
+
+/* ------------------------------------------------------------------ */
+/* Engine health                                                       */
+/* ------------------------------------------------------------------ */
+
+function healthFor(tabId: number): MockEngineHealth {
+  const enabledRuleCount = rules.filter((rule) => rule.enabled).length;
+  const frames = [...(frameStatus.get(tabId) ?? new Map<number, PageHookStatus>()).entries()]
+    .map(([frameId, status]) => ({ frameId, ...status }))
+    .filter((status) => Date.now() - status.updatedAt < 45_000);
+
+  const topFrame = frames.find((frame) => frame.frameId === 0);
+  const hooksInstalled = Boolean(topFrame?.installed && topFrame.fetchPatched && topFrame.xhrPatched);
+  const rulesSynced = isTopFrameSynchronized(topFrame, enabledRuleCount, ruleRevision);
+  const networkMockActive = networkMock.isActive(tabId);
+  const pageReady = hooksInstalled && rulesSynced;
+  const diagnosticError = (() => {
+    if (pageReady || networkMockActive) return null;
+    const recorded = engineErrors.get(tabId) ?? networkMock.error(tabId);
+    if (recorded) return recorded;
+    if (!topFrame) return 'Page hooks were not detected. Reload the target HTTP(S) page, then run Repair & test again.';
+    if (!topFrame.installed) return 'The page interceptor is present but did not finish installing.';
+    if (!topFrame.fetchPatched || !topFrame.xhrPatched) return 'Fetch or XMLHttpRequest was replaced by the page after ApiLens installed. Run Repair & test.';
+    if (!rulesSynced) return `Rules are not synchronized (page ${topFrame.ruleRevision || 'none'}, expected ${ruleRevision}).`;
+    return 'The mock engine did not become ready.';
+  })();
+
+  return {
+    ready: pageReady || networkMockActive,
+    engine: pageReady ? 'page-hook' : networkMockActive ? 'chromium-network' : 'none',
+    hooksInstalled,
+    rulesSynced: rulesSynced || networkMockActive,
+    enabledRuleCount,
+    expectedRevision: ruleRevision,
+    frames,
+    networkMockActive,
+    lastSelfTest: selfTests.get(tabId) ?? null,
+    error: diagnosticError,
+  };
 }
 
-function recordNetworkMock(tabId: number, request: CapturedRequest, rule: Rule, networkRequestId?: string) {
-  request.sessionId = getSessionId();
-  if (networkRequestId) {
-    mockedNetworkRequestIds.add(networkRequestId);
-    // Fetch.requestPaused normally exposes the same network ID as webRequest.
-    // Remove the marker if an aborted request never produces a terminal event.
-    setTimeout(() => mockedNetworkRequestIds.delete(networkRequestId), 30_000);
+async function pushRulesToTab(tabId: number): Promise<void> {
+  const tab = await extensionApi.tabs.get(tabId).catch(() => null);
+  const hostname = tab?.url ? parseUrl(tab.url).hostname : '';
+  const status = describeMockingStatus(hostname, rules, settings.environments);
+
+  await sendTabMessage(tabId, {
+    type: 'bridge:push-rules',
+    rules: status.allowed ? rules : [],
+    revision: status.allowed ? ruleRevision : revisionForRules([]),
+    mockingAllowed: status.allowed,
+  });
+  await sendTabMessage(tabId, {
+    type: 'bridge:push-settings',
+    captureBodies: settings.capture.captureBodies,
+    maxBodyBytes: settings.capture.maxBodyBytes,
+    mockingAllowed: status.allowed,
+  });
+}
+
+async function reinstallHooks(tabId: number): Promise<void> {
+  engineErrors.delete(tabId);
+  try {
+    await extensionApi.scripting.executeScript({ target: { tabId }, world: 'MAIN', files: ['content/page-interceptor.js'] });
+    await extensionApi.scripting.executeScript({ target: { tabId }, world: 'ISOLATED', files: ['content/bridge.js'] });
+  } catch (error) {
+    engineErrors.set(tabId, error instanceof Error ? error.message : String(error));
+    return;
   }
-  saveRequest(tabId, request);
-  const storedRule = activeRules.find(item => item.id === rule.id);
-  if (storedRule) {
-    storedRule.appliedCount = (storedRule.appliedCount || 0) + 1;
-    void api.storage.local.set({ apilens_rules: activeRules });
+
+  // Child frames are best-effort: a sandboxed iframe failing must not mark the
+  // whole tab unhealthy.
+  try {
+    await extensionApi.scripting.executeScript({ target: { tabId, allFrames: true }, world: 'MAIN', files: ['content/page-interceptor.js'] });
+    await extensionApi.scripting.executeScript({ target: { tabId, allFrames: true }, world: 'ISOLATED', files: ['content/bridge.js'] });
+  } catch {
+    // Restricted frames are expected and non-fatal.
   }
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  requestsByTab.delete(tabId);
-  interceptorStatusByTab.delete(tabId);
-  interceptorErrorsByTab.delete(tabId);
-  lastInterceptorRepairAtByTab.delete(tabId);
-  interceptorSelfTestByTab.delete(tabId);
-  void chromiumNetworkMock.disable(tabId);
+async function ensureEngine(tabId: number): Promise<MockEngineHealth> {
+  await reinstallHooks(tabId);
+  await pushRulesToTab(tabId);
+
+  const deadline = Date.now() + 1_500;
+  let health = healthFor(tabId);
+  while (!health.ready && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    health = healthFor(tabId);
+  }
+
+  if (!health.ready && rules.some((rule) => rule.enabled)) {
+    const network = await networkMock.enable(tabId);
+    if (!network.active && network.error) engineErrors.set(tabId, network.error);
+    health = healthFor(tabId);
+  }
+
+  return health;
+}
+
+async function runSelfTest(tabId: number): Promise<{ ok: boolean; error?: string; testedAt: number }> {
+  const health = healthFor(tabId);
+  if (health.engine === 'chromium-network') {
+    const result = { ok: true, testedAt: Date.now() };
+    selfTests.set(tabId, result);
+    return result;
+  }
+  const result = (await sendTabMessage<{ ok: boolean; error?: string; testedAt: number }>(tabId, { type: 'bridge:self-test' })) ?? {
+    ok: false,
+    error: 'The page did not respond to the self-test.',
+    testedAt: Date.now(),
+  };
+  selfTests.set(tabId, result);
+  return result;
+}
+
+/* ------------------------------------------------------------------ */
+/* State                                                               */
+/* ------------------------------------------------------------------ */
+
+async function buildState(tabId: number | null): Promise<PanelState> {
+  const tab = tabId !== null ? await extensionApi.tabs.get(tabId).catch(() => null) : null;
+  const hostname = tab?.url ? parseUrl(tab.url).hostname : '';
+  const mocking = describeMockingStatus(hostname, rules, settings.environments);
+  const environment = resolveEnvironment(hostname, settings.environments);
+
+  return {
+    version: EXTENSION_VERSION,
+    session: store.currentSession(),
+    recording: store.isRecording(),
+    settings,
+    rules,
+    agent: agent.getStatus(),
+    engine: tabId !== null ? healthFor(tabId) : null,
+    environmentId: environment.id,
+    environmentName: environment.name,
+    mockingAllowed: mocking.allowed,
+    mockingBlockedReason: mocking.reason,
+    pageUrl: tab?.url ?? null,
+  };
+}
+
+function broadcast(event: PanelEvent): void {
+  void sendRuntimeMessage(event);
+}
+
+async function broadcastState(tabId: number | null): Promise<void> {
+  broadcast({ type: 'event:state', state: await buildState(tabId) });
+}
+
+/* ------------------------------------------------------------------ */
+/* Message routing                                                     */
+/* ------------------------------------------------------------------ */
+
+async function handlePanelRequest(message: PanelRequest, senderTabId: number | null): Promise<PanelResponse> {
+  switch (message.type) {
+    case 'state:get':
+      return { ok: true, state: await buildState(message.tabId ?? senderTabId) };
+
+    case 'requests:get': {
+      const sessionId = message.sessionId ?? store.currentSession()?.id ?? null;
+      if (!sessionId) return { ok: true, requests: [] };
+      return { ok: true, requests: await store.requestsFor(sessionId) };
+    }
+
+    case 'recent:get': {
+      const tabId = message.tabId ?? senderTabId;
+      if (tabId === null) return { ok: true, requests: [] };
+      return { ok: true, requests: recentRequests.get(tabId) };
+    }
+
+    case 'requests:clear':
+      await store.clearCurrent();
+      return { ok: true };
+
+    case 'spans:get': {
+      const sessionId = message.sessionId ?? store.currentSession()?.id ?? null;
+      if (!sessionId) return { ok: true, spans: [] };
+      return { ok: true, spans: await store.spansFor(sessionId) };
+    }
+
+    case 'rules:get':
+      return { ok: true, rules };
+
+    case 'rules:set': {
+      await persistRules(message.rules);
+      const session = store.currentSession();
+      if (session) agent.syncRules(session.id, message.rules);
+      const tabId = message.tabId ?? senderTabId;
+      if (tabId !== null) {
+        await pushRulesToTab(tabId);
+        if (message.rules.some((rule) => rule.enabled)) await ensureEngine(tabId);
+        else await networkMock.disable(tabId);
+      }
+      await broadcastState(tabId);
+      return { ok: true, rules: message.rules };
+    }
+
+    case 'settings:get':
+      return { ok: true, settings };
+
+    case 'settings:set': {
+      settings = message.settings;
+      await saveSettings(settings);
+      if (settings.agent.enabled) agent.connect(settings.agent, store.currentSession()?.id ?? null);
+      else agent.disconnect();
+      if (senderTabId !== null) await pushRulesToTab(senderTabId);
+      await broadcastState(senderTabId);
+      return { ok: true, settings };
+    }
+
+    case 'session:start': {
+      const tabId = message.tabId ?? senderTabId;
+      const tab = tabId !== null ? await extensionApi.tabs.get(tabId).catch(() => null) : null;
+      const hostname = tab?.url ? parseUrl(tab.url).hostname : '';
+      const session = await store.startSession({
+        name: message.name,
+        startUrl: tab?.url ?? null,
+        environmentId: resolveEnvironment(hostname, settings.environments).id,
+        userAgent: navigator.userAgent,
+      });
+      agent.setSessionId(session.id);
+      agent.startSession(session);
+      if (tabId !== null) consoleMessages.delete(tabId);
+      await broadcastState(tabId);
+      return { ok: true, state: await buildState(tabId) };
+    }
+
+    case 'session:stop': {
+      const session = await store.stopSession();
+      if (session) agent.stopSession(session.id);
+      await store.enforceRetention(settings.retention);
+      await broadcastState(senderTabId);
+      return { ok: true, state: await buildState(senderTabId) };
+    }
+
+    case 'session:marker': {
+      const session = store.currentSession();
+      if (!session) return { ok: false, error: 'No session is recording.' };
+      await store.updateSession({ markers: [...session.markers, message.marker] });
+      return { ok: true };
+    }
+
+    case 'session:evidence:set': {
+      const session = store.currentSession();
+      if (!session) return { ok: false, error: 'Start an evidence recording first.' };
+      const title = message.title.trim().slice(0, 160);
+      if (!title) return { ok: false, error: 'Test evidence title is required.' };
+      const scenarios: EvidenceScenario[] = message.scenarios.slice(0, 50).map((scenario) => ({
+        ...scenario,
+        title: scenario.title.trim().slice(0, 160),
+        expectedResult: scenario.expectedResult.trim().slice(0, 2_000),
+        actualResult: scenario.actualResult.trim().slice(0, 2_000),
+        notes: scenario.notes.trim().slice(0, 2_000),
+      })).filter((scenario) => Boolean(scenario.id && scenario.title));
+      const activeScenarioId = message.activeScenarioId && scenarios.some((scenario) => scenario.id === message.activeScenarioId)
+        ? message.activeScenarioId
+        : null;
+      await store.updateSession({ name: title, scenarios, activeScenarioId });
+      await broadcastState(senderTabId);
+      return { ok: true, state: await buildState(senderTabId) };
+    }
+
+    case 'session:screenshot': {
+      const session = store.currentSession();
+      if (!session || session.status !== 'recording') return { ok: false, error: 'Start evidence recording before taking a screenshot.' };
+      const tabId = message.tabId ?? senderTabId;
+      if (tabId === null) return { ok: false, error: 'No active web page is available for screenshot capture.' };
+      const tab = await extensionApi.tabs.get(tabId).catch(() => null);
+      if (!tab || tab.windowId === undefined) return { ok: false, error: 'The active browser tab could not be captured.' };
+      if (message.scenarioId && !(session.scenarios ?? []).some((scenario) => scenario.id === message.scenarioId)) {
+        return { ok: false, error: 'Select a valid scenario before taking a screenshot.' };
+      }
+      try {
+        const resourceRef = await extensionApi.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+        const screenshotCount = session.markers.filter((marker) => marker.kind === 'screenshot').length;
+        const marker = {
+          id: createId(),
+          kind: 'screenshot' as const,
+          label: message.label.trim().slice(0, 160) || `Screenshot ${screenshotCount + 1}`,
+          timestamp: Date.now(),
+          detail: tab.url ?? null,
+          resourceRef,
+          scenarioId: message.scenarioId,
+        };
+        await store.updateSession({ markers: [...session.markers, marker] });
+        await broadcastState(tabId);
+        return { ok: true, state: await buildState(tabId) };
+      } catch (error) {
+        return { ok: false, error: `Screenshot capture failed: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+
+    case 'session:list':
+      return { ok: true, sessions: await store.listSessions() };
+
+    case 'session:load': {
+      const session = await store.getSession(message.sessionId);
+      if (!session) return { ok: false, error: 'That session no longer exists.' };
+      return { ok: true, requests: await store.requestsFor(message.sessionId) };
+    }
+
+    case 'session:delete':
+      await store.deleteSession(message.sessionId);
+      return { ok: true };
+
+    case 'session:clearAll':
+      await store.clearAll();
+      await broadcastState(senderTabId);
+      return { ok: true };
+
+    case 'engine:health': {
+      const tabId = message.tabId ?? senderTabId;
+      if (tabId === null) return { ok: false, error: 'No inspected tab is available.' };
+      await pushRulesToTab(tabId);
+      return { ok: true, health: healthFor(tabId) };
+    }
+
+    case 'engine:repair': {
+      const tabId = message.tabId ?? senderTabId;
+      if (tabId === null) return { ok: false, error: 'No inspected tab is available.' };
+      frameStatus.delete(tabId);
+      const health = await ensureEngine(tabId);
+      const selfTest = health.ready ? await runSelfTest(tabId) : { ok: false, error: health.error ?? 'No mock engine could be installed.', testedAt: Date.now() };
+      return { ok: true, health: { ...healthFor(tabId), ready: health.ready && selfTest.ok, lastSelfTest: selfTest } };
+    }
+
+    case 'replay:execute': {
+      const session = store.currentSession();
+      if (message.viaAgent) {
+        if (!agent.isConnected()) return { ok: false, error: 'The QA agent is not connected, so a server-side replay is not possible.' };
+        try {
+          const response = await agent.replay(session?.id ?? '', message.originalRequestId, message.request);
+          return { ok: true, response };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      const response = await executeReplay(message.request, { executedBy: 'extension', maxBodyBytes: settings.capture.maxBodyBytes });
+      return { ok: true, response };
+    }
+
+    case 'evidence:export': {
+      const session = await store.getSession(message.sessionId);
+      if (!session) return { ok: false, error: 'That session no longer exists.' };
+
+      const requests = await store.requestsFor(message.sessionId);
+      const spans = await store.spansFor(message.sessionId);
+      const bundle = buildEvidenceBundle({
+        session,
+        requests,
+        spans,
+        rules,
+        environment: {
+          environmentId: session.environmentId,
+          environmentName: session.environmentId,
+          browser: navigator.userAgent,
+          userAgent: session.userAgent,
+          platform: navigator.platform,
+          extensionVersion: EXTENSION_VERSION,
+          agentVersion: agent.getStatus().agentVersion,
+        },
+        consoleMessages: [...consoleMessages.values()].flat().map((entry) => ({ ...entry, url: entry.url })),
+        assertions: await readList<ResponseAssertion>(ASSERTIONS_KEY),
+        contracts: await readList<ContractSet>(CONTRACTS_KEY),
+        redactionPolicy: settings.redaction,
+        options: message.options,
+      });
+
+      const artifacts = renderArtifacts(bundle, message.options);
+      return { ok: true, files: artifacts.map((artifact) => ({ format: artifact.contentType, name: artifact.fileName, content: artifact.content })) };
+    }
+
+    case 'agent:status':
+      return { ok: true, agent: agent.getStatus() };
+
+    case 'agent:connect':
+      agent.connect(settings.agent, store.currentSession()?.id ?? null);
+      return { ok: true, agent: agent.getStatus() };
+
+    case 'agent:disconnect':
+      agent.disconnect();
+      return { ok: true, agent: agent.getStatus() };
+
+    case 'bookmarks:get':
+      return { ok: true, bookmarks: await readList<Bookmark>(BOOKMARKS_KEY) };
+
+    case 'bookmarks:set':
+      await extensionApi.storage.local.set({ [BOOKMARKS_KEY]: message.bookmarks });
+      return { ok: true, bookmarks: message.bookmarks };
+
+    case 'catalog:get': {
+      const sessionId = store.currentSession()?.id;
+      const requests = sessionId ? await store.requestsFor(sessionId) : [];
+      const catalog: ApiCatalog = buildCatalog(requests);
+      return { ok: true, catalog };
+    }
+
+    case 'assertions:get':
+      return { ok: true, assertions: await readList<ResponseAssertion>(ASSERTIONS_KEY) };
+
+    case 'assertions:set':
+      await extensionApi.storage.local.set({ [ASSERTIONS_KEY]: message.assertions });
+      return { ok: true, assertions: message.assertions };
+
+    case 'contracts:get':
+      return { ok: true, contracts: await readList<ContractSet>(CONTRACTS_KEY) };
+
+    case 'contracts:set':
+      await extensionApi.storage.local.set({ [CONTRACTS_KEY]: message.contracts });
+      return { ok: true, contracts: message.contracts };
+
+    default:
+      return { ok: false, error: `Unsupported request "${(message as { type: string }).type}".` };
+  }
+}
+
+extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const payload = message as { type?: string } | undefined;
+  if (!payload || typeof payload.type !== 'string') return undefined;
+  const senderTabId = sender.tab?.id ?? null;
+
+  /* Bridge traffic from content scripts. */
+  if (payload.type === 'bridge:rules') {
+    void (async () => {
+      await initialization;
+      const hostname = sender.tab?.url ? parseUrl(sender.tab.url).hostname : '';
+      const status = describeMockingStatus(hostname, rules, settings.environments);
+      sendResponse({
+        rules: status.allowed ? rules : [],
+        revision: status.allowed ? ruleRevision : revisionForRules([]),
+        captureBodies: settings.capture.captureBodies,
+        maxBodyBytes: settings.capture.maxBodyBytes,
+        mockingAllowed: status.allowed,
+      });
+    })();
+    return true;
+  }
+
+  if (payload.type === 'bridge:status') {
+    if (senderTabId !== null) {
+      const frames = frameStatus.get(senderTabId) ?? new Map<number, PageHookStatus>();
+      frames.set(sender.frameId ?? 0, (payload as { status: PageHookStatus }).status);
+      frameStatus.set(senderTabId, frames);
+    }
+    sendResponse(true);
+    return undefined;
+  }
+
+  if (payload.type === 'bridge:request') {
+    void initialization.then(() => {
+      if (senderTabId !== null) ingest(senderTabId, (payload as { request: CapturedRequest }).request);
+      sendResponse(true);
+    });
+    return true;
+  }
+
+  if (payload.type === 'bridge:console') {
+    if (senderTabId !== null) {
+      const entry = payload as { level: 'error' | 'warning' | 'info'; text: string; timestamp: number };
+      const bucket = consoleMessages.get(senderTabId) ?? [];
+      bucket.push({ level: entry.level, text: entry.text, timestamp: entry.timestamp, url: sender.tab?.url ?? null });
+      consoleMessages.set(senderTabId, bucket.slice(-200));
+      broadcast({ type: 'event:console', tabId: senderTabId, level: entry.level, text: entry.text, timestamp: entry.timestamp });
+    }
+    sendResponse(true);
+    return undefined;
+  }
+
+  /* Panel and popup requests. */
+  void initialization.then(() => handlePanelRequest(payload as PanelRequest, senderTabId))
+    .then(sendResponse)
+    .catch((error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  return true;
 });
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'INTERCEPTOR_STATUS') {
-    const tabId = sender.tab?.id;
-    if (tabId) {
-      const frames = interceptorStatusByTab.get(tabId) || new Map<number, any>();
-      frames.set(sender.frameId ?? 0, { ...message.status, updatedAt: Date.now() });
-      interceptorStatusByTab.set(tabId, frames);
-    }
-    sendResponse(true);
-  } else if (message.type === 'GET_INTERCEPTOR_STATUS') {
-    const tabId = message.tabId ?? sender.tab?.id;
-    if (!tabId) {
-      sendResponse({
-        installed: false,
-        hooksInstalled: false,
-        rulesSynced: false,
-        frames: [],
-        enabledRuleCount: activeRules.filter(rule => rule.enabled).length,
-        error: 'No active browser tab was found.'
-      });
-    } else {
-      void (async () => {
-        await api.tabs.sendMessage(tabId, {
-          type: 'CHECK_INTERCEPTOR',
-          rules: activeRules,
-          revision: activeRulesRevision
-        }).catch(() => undefined);
-        await new Promise(resolve => setTimeout(resolve, 75));
-        let health = getInterceptorHealth(tabId);
-        const lastRepairAt = lastInterceptorRepairAtByTab.get(tabId) || 0;
-        if (!health.installed && Date.now() - lastRepairAt > 10_000) {
-          lastInterceptorRepairAtByTab.set(tabId, Date.now());
-          interceptorStatusByTab.delete(tabId);
-          interceptorErrorsByTab.delete(tabId);
-          health = await ensureWorkingMockEngine(tabId);
-        }
-        sendResponse(health);
-      })();
-    }
-  } else if (message.type === 'REPAIR_INTERCEPTOR') {
-    const tabId = message.tabId ?? sender.tab?.id;
-    if (!tabId) {
-      sendResponse({ ok: false, error: 'No active browser tab was found.' });
-    } else {
-      interceptorStatusByTab.delete(tabId);
-      interceptorErrorsByTab.delete(tabId);
-      lastInterceptorRepairAtByTab.set(tabId, Date.now());
-      void (async () => {
-        try {
-          const health = await ensureWorkingMockEngine(tabId);
-          const selfTest = health.installed ? await runMockEngineSelfTest(tabId) : { ok: false, error: 'Neither the page nor network mock engine is active.' };
-          sendResponse({ ...health, installed: health.installed && selfTest.ok, ok: health.installed && selfTest.ok, selfTest, error: health.error || selfTest.error || null });
-        } catch (error) {
-          sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
-        }
-      })();
-    }
-  } else if (message.type === 'GET_RULES') {
-    sendResponse({ rules: activeRules, revision: activeRulesRevision });
-  } else if (message.type === 'MOCK_INTERCEPTED') {
-    const tabId = sender.tab?.id;
-    if (tabId && message.request) {
-      const request = message.request as CapturedRequest;
-      if (request.scenarioApplied === '__APILENS_SELF_TEST__') {
-        sendResponse(true);
-        return true;
-      }
-      request.sessionId = getSessionId();
-      request.id = request.id || generateId();
-      saveRequest(tabId, request);
-      const rule = activeRules.find(item => item.name === request.scenarioApplied);
-      if (rule) {
-        rule.appliedCount = (rule.appliedCount || 0) + 1;
-        chrome.storage.local.set({ apilens_rules: activeRules });
-      }
-    }
-    sendResponse(true);
-  } else if (message.type === 'RUN_MOCK_SELF_TEST') {
-    void (async () => {
-      let tabId = message.tabId ?? sender.tab?.id;
-      if (!tabId) {
-        const tabs = await api.tabs.query({ active: true, currentWindow: true });
-        tabId = tabs[0]?.id;
-      }
-      if (!tabId) {
-        sendResponse({ ok: false, error: 'No active browser tab was found.' });
-        return;
-      }
-      let health = getInterceptorHealth(tabId);
-      if (!health.installed) health = await ensureWorkingMockEngine(tabId);
-      sendResponse(health.installed
-        ? await runMockEngineSelfTest(tabId)
-        : { ok: false, error: health.error || 'Neither the page nor network mock engine is active.' });
-    })();
-  } else if (message.type === 'GET_REQUESTS') {
-    const targetTabId = message.tabId || sender.tab?.id;
-    if (targetTabId && requestsByTab.has(targetTabId)) {
-      sendResponse(requestsByTab.get(targetTabId) || []);
-    } else if (!targetTabId) {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const activeId = tabs[0]?.id;
-        if (activeId && requestsByTab.has(activeId)) {
-          sendResponse(requestsByTab.get(activeId) || []);
-        } else {
-          const all: CapturedRequest[] = [];
-          requestsByTab.forEach((reqs) => all.push(...reqs));
-          sendResponse(all.slice(-1000));
-        }
-      });
-      return true;
-    } else {
-      sendResponse([]);
-    }
-  } else if (message.type === 'CLEAR_REQUESTS') {
-    const targetTabId = message.tabId || sender.tab?.id;
-    if (targetTabId) {
-      requestsByTab.set(targetTabId, []);
-    } else {
-      requestsByTab.clear();
-    }
-    sendResponse(true);
-  } else if (message.type === 'SET_RECORDING') {
-    isRecording = !!message.enabled;
-    chrome.storage.local.set({ isRecording });
-    sendResponse(true);
-  } else if (message.type === 'SYNC_RULES') {
-    if (!Array.isArray(message.rules)) {
-      sendResponse({ ok: false, error: 'The rule payload is invalid.' });
-    } else {
-      void (async () => {
-        try {
-          replaceActiveRules(message.rules);
-          await api.storage.local.set({ apilens_rules: activeRules });
-          setupNetRequestRules();
+/* ------------------------------------------------------------------ */
+/* Lifecycle                                                           */
+/* ------------------------------------------------------------------ */
 
-          let tabId = message.tabId ?? sender.tab?.id;
-          if (!tabId) {
-            const tabs = await api.tabs.query({ active: true, currentWindow: true });
-            tabId = tabs[0]?.id;
-          }
-          if (!tabId) {
-            sendResponse({ ok: false, error: 'Rules were saved, but no active browser tab was found.' });
-            return;
-          }
+extensionApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete' || !/^https?:/i.test(tab.url ?? '')) return;
+  void initialization.then(async () => {
+    frameStatus.delete(tabId);
+    selfTests.delete(tabId);
+    await pushRulesToTab(tabId);
+    if (rules.some((rule) => rule.enabled)) await ensureEngine(tabId);
 
-          interceptorStatusByTab.delete(tabId);
-          interceptorErrorsByTab.delete(tabId);
-          lastInterceptorRepairAtByTab.set(tabId, Date.now());
-          const health = await ensureWorkingMockEngine(tabId);
-          const selfTest = health.installed ? await runMockEngineSelfTest(tabId) : { ok: false, error: 'Neither the page nor network mock engine is active.' };
-          const engineReady = health.installed && selfTest.ok;
-          sendResponse({
-            tabId,
-            ...health,
-            installed: engineReady,
-            ok: engineReady,
-            selfTest,
-            error: health.error || selfTest.error || (engineReady ? null : 'The page did not pass the mock-engine self-test. Use Repair now, then reload the page.')
-          });
-        } catch (error) {
-          sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
-        }
-      })();
+    const session = store.currentSession();
+    if (session?.status === 'recording' && tab.url) {
+      await store.updateSession({
+        markers: [
+          ...session.markers,
+          { id: `${tabId}-${Date.now()}`, kind: 'navigation', label: tab.url, timestamp: Date.now(), detail: null, resourceRef: null },
+        ],
+      });
     }
+  }).catch((error: unknown) => {
+    engineErrors.set(tabId, error instanceof Error ? error.message : String(error));
+  });
+});
+
+extensionApi.tabs.onRemoved.addListener((tabId) => {
+  frameStatus.delete(tabId);
+  engineErrors.delete(tabId);
+  selfTests.delete(tabId);
+  consoleMessages.delete(tabId);
+  recentRequests.clear(tabId);
+  void networkMock.disable(tabId);
+});
+
+extensionApi.alarms.create(HEALTH_ALARM, { periodInMinutes: 0.5 });
+extensionApi.alarms.create(RETENTION_ALARM, { periodInMinutes: 60 });
+
+extensionApi.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RETENTION_ALARM) {
+    void store.enforceRetention(settings.retention);
+    return;
   }
-  return true;
+  if (alarm.name !== HEALTH_ALARM) return;
+
+  // Flushing on the health tick guarantees buffered captures reach IndexedDB
+  // before MV3 suspends the worker.
+  void store.flush();
+  if (!rules.some((rule) => rule.enabled)) return;
+
+  void extensionApi.tabs.query({ active: true }).then((tabs) => {
+    tabs
+      .filter((tab) => tab.id !== undefined && /^https?:/i.test(tab.url ?? ''))
+      .forEach((tab) => {
+        if (!healthFor(tab.id!).ready) void ensureEngine(tab.id!);
+      });
+  });
+});
+
+extensionApi.runtime.onSuspend?.addListener(() => {
+  void store.flush();
+  void networkMock.disableAll();
 });
