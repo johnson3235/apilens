@@ -48,7 +48,17 @@ pnpm --filter @apilens/demo-api-server dev
 pnpm --filter @apilens/demo-nextjs-app dev
 ```
 
-Open `http://localhost:3000`, then record the checkout journey. The existing Next demo uses server fetch and does not mount Express middleware: it does not demonstrate server-to-backend instrumentation. The legacy `@apilens/node-sdk` requires Express context and http/https calls. For App Router server fetch, explicitly integrate the separate [Next SDK](../sdks/next/README.md); the demo has not been migrated automatically.
+Open `http://localhost:3000`, then record the checkout journey.
+
+The Next demo is instrumented with the [Next SDK](../sdks/next/README.md): its `app/api` routes are wrapped, so each incoming route and the upstream calls it makes to the demo API appear in **Server API**. Start it with the control plane on:
+
+```powershell
+$env:APILENS_ENABLED = 'true'
+$env:APILENS_CONTROL_TOKEN = 'demo-control-token-0123456789abcdef'  # any local value of 24+ characters
+pnpm --filter @apilens/demo-nextjs-app dev
+```
+
+In **Settings → Instrumented server**, enter `http://localhost:3000` and the same token. `apps/browser-extension/e2e/server.e2e.mjs` drives this journey end to end, including a server mock on the payment call.
 
 For CLEAR-APP, use the [browser-only QA runbook](clear-app-qa-setup.md). No SDK or agent is required for browser capture.
 

@@ -17,6 +17,12 @@ import type {
 import type { ExtensionSettings } from './settings';
 import type { MockEngineHealth } from './engine-health';
 import type { TracePropagationSettings } from './trace-propagation';
+import type {
+  ServerBridgeStatus,
+  ServerCall,
+  ServerControlHealth,
+  ServerMockRule,
+} from './server-control';
 
 /**
  * Every message crossing an extension boundary is described here.
@@ -57,7 +63,13 @@ export type PanelRequest =
   | { type: 'assertions:get' }
   | { type: 'assertions:set'; assertions: ResponseAssertion[] }
   | { type: 'contracts:get' }
-  | { type: 'contracts:set'; contracts: ContractSet[] };
+  | { type: 'contracts:set'; contracts: ContractSet[] }
+  | { type: 'server:sync' }
+  | { type: 'server:calls:get' }
+  | { type: 'server:calls:clear' }
+  | { type: 'server:rules:get' }
+  | { type: 'server:rules:set'; rules: ServerMockRule[] }
+  | { type: 'server:test'; url: string; token: string };
 
 export interface PanelState {
   version: string;
@@ -72,6 +84,8 @@ export interface PanelState {
   mockingAllowed: boolean;
   mockingBlockedReason: string | null;
   pageUrl: string | null;
+  /** Link to the instrumented server, when one is configured. */
+  server: ServerBridgeStatus;
 }
 
 export type PanelResponse =
@@ -89,6 +103,9 @@ export type PanelResponse =
   | { ok: true; catalog: ApiCatalog }
   | { ok: true; assertions: ResponseAssertion[] }
   | { ok: true; contracts: ContractSet[] }
+  | { ok: true; serverStatus: ServerBridgeStatus; calls: ServerCall[] }
+  | { ok: true; serverRules: ServerMockRule[] }
+  | { ok: true; serverHealth: ServerControlHealth }
   | { ok: true }
   | { ok: false; error: string };
 
@@ -98,6 +115,7 @@ export type PanelEvent =
   | { type: 'event:spans'; spans: TraceSpan[] }
   | { type: 'event:state'; state: PanelState }
   | { type: 'event:agent'; agent: AgentStatus }
+  | { type: 'event:server'; status: ServerBridgeStatus; calls: ServerCall[] }
   | { type: 'event:console'; tabId: number; level: 'error' | 'warning' | 'info'; text: string; timestamp: number };
 
 /** Messages exchanged between the ISOLATED bridge and the MAIN-world hooks. */

@@ -96,16 +96,6 @@ export function RequestDetail({
               <ChannelBadge channel={request.channel} />
               {request.mock ? <span className="badge mock">rule: {request.mock.ruleName}</span> : null}
               {request.retryAttempt > 0 ? <span className="badge warn">retry #{request.retryAttempt}</span> : null}
-              <span className="spacer" />
-              <button type="button" className="btn sm" onClick={() => onBookmark(request)}>
-                Bookmark
-              </button>
-              <button type="button" className="btn sm" onClick={() => onReplay(request)}>
-                Replay
-              </button>
-              <button type="button" className="btn sm" onClick={() => onCreateMock(request)}>
-                Mock this
-              </button>
             </div>
 
             <dl className="kv">
@@ -364,6 +354,14 @@ export function RequestDetail({
             </div>
           </>
         ) : null}
+      </div>
+
+      {/* Primary actions stay reachable from every tab — they used to live in
+          the Summary tab only, which hid them the moment you read a payload. */}
+      <div className="detail-actions sticky">
+        <button type="button" className="btn primary" onClick={() => onCreateMock(request)}>Mock this</button>
+        <button type="button" className="btn" onClick={() => onReplay(request)}>Replay</button>
+        <button type="button" className="btn" onClick={() => onBookmark(request)}>Bookmark</button>
       </div>
     </>
   );

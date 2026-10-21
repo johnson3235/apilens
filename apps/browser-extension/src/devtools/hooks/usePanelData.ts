@@ -108,6 +108,10 @@ export function usePanelData(): PanelData {
         case 'event:agent':
           setState((previous) => (previous ? { ...previous, agent: event.agent } : previous));
           return;
+        case 'event:server':
+          // Keeps the header and setup checklist current without a full state refresh.
+          setState((previous) => (previous ? { ...previous, server: event.status } : previous));
+          return;
         case 'event:console':
           setConsoleMessages((previous) =>
             [...previous, { level: event.level, text: event.text, timestamp: event.timestamp, url: null }].slice(-200),

@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@apilens/next-sdk": "workspace:*",
     "@apilens/node-sdk": "workspace:*",
     "next": "14.2.3",
     "react": "^18.3.1",

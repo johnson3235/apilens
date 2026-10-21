@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export interface VirtualTableColumn<T> {
   key: string;
   header: string;
+  /** `auto` lets the column absorb remaining space instead of a fixed size. */
   width: string;
   className?: string;
   render: (item: T) => React.ReactNode;
@@ -65,7 +66,11 @@ export function VirtualTable<T>({
     <div className="vtable" ref={containerRef} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
       <div className="vtable-head">
         {columns.map((column) => (
-          <div key={column.key} style={{ flex: `0 0 ${column.width}` }} className={column.className}>
+          <div
+            key={column.key}
+            style={column.width === 'auto' ? { flex: '1 1 auto', minWidth: 0 } : { flex: `0 0 ${column.width}` }}
+            className={column.className}
+          >
             {column.header}
           </div>
         ))}
@@ -93,7 +98,11 @@ export function VirtualTable<T>({
                 }}
               >
                 {columns.map((column) => (
-                  <div key={column.key} className={`cell ${column.className ?? ''}`} style={{ flex: `0 0 ${column.width}` }}>
+                  <div
+                    key={column.key}
+                    className={`cell ${column.className ?? ''}`}
+                    style={column.width === 'auto' ? { flex: '1 1 auto', minWidth: 0 } : { flex: `0 0 ${column.width}` }}
+                  >
                     {column.render(item)}
                   </div>
                 ))}

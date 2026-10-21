@@ -1,0 +1,10 @@
+{
+  "name": "@apilens/next-sdk",
+  "version": "0.2.0",
+  "description": "Opt-in Node-runtime App Router tracing, payload capture and server mocking for ApiLens (vendored copy for the CLEAR demo app)",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "engines": {
+    "node": ">=20"
+  }
+}

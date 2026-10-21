@@ -1,7 +1,7 @@
 {
   "name": "@apilens/next-sdk",
-  "version": "0.1.0",
-  "description": "Opt-in Node-runtime App Router and native fetch tracing for ApiLens",
+  "version": "0.2.0",
+  "description": "Opt-in Node-runtime App Router tracing, payload capture and server mocking for ApiLens",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": ["dist", "README.md"],

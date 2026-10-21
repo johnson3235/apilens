@@ -1,0 +1,26 @@
+{
+  "name": "clear-demo-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dummy CLEAR-style My Account app (dashboard + billing) instrumented with the ApiLens Next SDK, for live QA demos.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "sdk:sync": "node scripts/sync-sdk.mjs",
+    "check:live": "node scripts/check-live.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@apilens/next-sdk": "file:./vendor/apilens-next-sdk",
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "~5.5.0"
+  }
+}

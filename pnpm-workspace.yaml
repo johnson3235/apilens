@@ -3,3 +3,5 @@ packages:
   - "packages/*"
   - "sdks/*"
   - "examples/*"
+  # Standalone npm project so it can be deployed to Vercel on its own.
+  - "!examples/clear-demo-app"

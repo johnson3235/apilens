@@ -1,0 +1,141 @@
+:root {
+  --ink: #14202b;
+  --muted: #5b6b78;
+  --line: #dfe5ea;
+  --ground: #f4f6f8;
+  --card: #ffffff;
+  --brand: #0f766e;
+  --brand-ink: #ffffff;
+  --brand-soft: #e3f3f1;
+  --warn: #b45309;
+  --error: #b42318;
+  --error-soft: #fdecea;
+  --ok: #067647;
+  --ok-soft: #e6f4ec;
+  --radius: 14px;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  color: var(--ink);
+  background: var(--ground);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--ground); }
+a { color: inherit; }
+
+.demo-banner {
+  background: #14202b;
+  color: #cfe0dd;
+  font-size: 12px;
+  text-align: center;
+  padding: 6px 16px;
+  letter-spacing: 0.02em;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 14px clamp(16px, 4vw, 48px);
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; text-decoration: none; }
+.brand em { font-style: normal; font-weight: 500; color: var(--muted); }
+.brand-mark {
+  width: 32px; height: 32px; border-radius: 9px;
+  display: grid; place-items: center;
+  background: var(--brand); color: var(--brand-ink); font-weight: 800;
+}
+.nav { display: flex; gap: 18px; flex: 1; }
+.nav a { text-decoration: none; color: var(--muted); font-weight: 600; }
+.nav a:hover { color: var(--ink); }
+.avatar {
+  width: 36px; height: 36px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--brand-soft); color: var(--brand); font-weight: 700; font-size: 13px;
+}
+
+.page { max-width: 1080px; margin: 0 auto; padding: 32px clamp(16px, 4vw, 48px) 48px; }
+.footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 16px 32px; }
+
+.hero { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+.hero h1 { margin: 4px 0; font-size: 32px; }
+.eyebrow { margin: 0; font-size: 13px; font-weight: 700; color: var(--brand); text-transform: uppercase; letter-spacing: 0.06em; }
+.eyebrow a { text-decoration: none; }
+.muted { color: var(--muted); margin: 4px 0; }
+.small { font-size: 13px; }
+.mono { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 13px; }
+
+.grid { display: grid; gap: 16px; margin-bottom: 16px; }
+.grid.two { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.grid.three { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px;
+  margin-bottom: 16px;
+  min-height: 170px;
+}
+.grid .card { margin-bottom: 0; }
+.card-title { margin: 0 0 10px; font-size: 15px; color: var(--muted); font-weight: 600; }
+.big-number { font-size: 40px; font-weight: 750; margin: 0; letter-spacing: -0.02em; }
+
+.row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--brand);
+  background: var(--brand); color: var(--brand-ink);
+  font: inherit; font-weight: 600; font-size: 14px;
+  padding: 9px 16px; border-radius: 10px;
+  cursor: pointer; text-decoration: none;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn.secondary { background: transparent; color: var(--brand); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.link { border: 0; background: none; color: var(--brand); font: inherit; font-weight: 600; cursor: pointer; }
+
+.section-heading { font-size: 18px; margin: 32px 0 12px; }
+.tile {
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+  text-align: left; font: inherit; color: inherit; text-decoration: none;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 16px 18px; cursor: pointer;
+}
+.tile:hover { border-color: var(--brand); }
+.tile.accent { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); }
+
+.notice {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  background: var(--brand-soft); border: 1px solid #b8dfda; color: var(--ink);
+  padding: 12px 16px; border-radius: 10px; margin-top: 16px;
+}
+
+.loading { display: grid; gap: 10px; padding-top: 6px; }
+.skeleton { height: 16px; width: 55%; border-radius: 6px; background: linear-gradient(90deg, #edf1f4, #f7f9fa, #edf1f4); background-size: 200% 100%; animation: shimmer 1.2s infinite; }
+.skeleton.wide { height: 36px; width: 70%; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+.error-box { background: var(--error-soft); border: 1px solid #f5c2bc; border-radius: 10px; padding: 14px 16px; }
+.error-box p { margin: 2px 0; }
+.error-box strong { color: var(--error); }
+.tech { font-size: 12px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+
+.lines { list-style: none; padding: 0; margin: 14px 0 0; border-top: 1px solid var(--line); }
+.lines li { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.num { text-align: right; }
+.pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+.pill.paid { background: var(--ok-soft); color: var(--ok); }
+.pill.unpaid { background: #fff4e5; color: var(--warn); }
+
+/* Where this page loads its data — helps the audience compare Network and Server API. */
+.where { display: inline-block; margin-top: 8px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+.where.server { background: #ede9fe; color: #5b21b6; }
+.where.browser { background: #e0f2fe; color: #075985; }

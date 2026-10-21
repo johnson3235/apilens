@@ -32,6 +32,7 @@ import { CaptureStore } from './capture-store';
 import { AgentClient } from './agent-client';
 import { ChromiumNetworkMock } from './network-mock';
 import { RecentRequestBuffer } from './recent-request-buffer';
+import { ServerBridge } from './server-bridge';
 
 const RULES_KEY = 'apilens.rules.v1';
 const BOOKMARKS_KEY = 'apilens.bookmarks.v1';
@@ -51,6 +52,8 @@ const consoleMessages = new Map<number, Array<{ level: 'error' | 'warning' | 'in
 const inFlight = new Map<string, CapturedRequest>();
 const mockedNetworkIds = new Set<string>();
 const recentRequests = new RecentRequestBuffer();
+/** Current document per tab, so every capture can be grouped by page. */
+const tabPageUrls = new Map<number, string>();
 
 const store = new CaptureStore({
   onRequests: (sessionId, requests) => {
@@ -71,6 +74,8 @@ const agent = new AgentClient({
   },
   onStatusChange: (status) => broadcast({ type: 'event:agent', agent: status }),
 });
+
+const serverBridge = new ServerBridge();
 
 const networkMock = new ChromiumNetworkMock(
   () => rules,
@@ -93,6 +98,7 @@ const initialization = Promise.all([loadSettings(), loadRules(), store.restore()
   const restoredTrace = await extensionApi.storage.session.get('apilens-tracing-tab');
   tracingTabId = session?.status === 'recording' && typeof restoredTrace['apilens-tracing-tab'] === 'number' ? restoredTrace['apilens-tracing-tab'] : null;
   if (settings.agent.enabled) agent.connect(settings.agent, session?.id ?? null);
+  serverBridge.configure(settings.serverControl);
 });
 
 /* ------------------------------------------------------------------ */
@@ -124,7 +130,15 @@ async function readList<T>(key: string): Promise<T[]> {
 function ingest(tabId: number, request: CapturedRequest): void {
   const enriched = enrichWithTraceContext(request, settings.traceHeaders);
   const environment = resolveEnvironment(enriched.hostname, settings.environments);
-  const withEnvironment: CapturedRequest = { ...enriched, environmentId: environment.id, originId: String(tabId) };
+  const withEnvironment: CapturedRequest = {
+    ...enriched,
+    environmentId: environment.id,
+    originId: String(tabId),
+    // `webRequest` records carry no page context, so the tab's current
+    // document is attached here. Without it, per-page grouping in the panel
+    // would only ever see page-hook traffic.
+    pageUrl: enriched.pageUrl ?? tabPageUrls.get(tabId) ?? null,
+  };
 
   if (!settings.capture.captureStaticAssets && (withEnvironment.type === 'static' || isStaticAssetPath(withEnvironment.path))) {
     return;
@@ -395,6 +409,7 @@ async function buildState(tabId: number | null): Promise<PanelState> {
     mockingAllowed: mocking.allowed,
     mockingBlockedReason: mocking.reason,
     pageUrl: tab?.url ?? null,
+    server: serverBridge.status(),
   };
 }
 
@@ -462,6 +477,7 @@ async function handlePanelRequest(message: PanelRequest, senderTabId: number | n
       await saveSettings(settings);
       if (settings.agent.enabled) agent.connect(settings.agent, store.currentSession()?.id ?? null);
       else agent.disconnect();
+      serverBridge.configure(settings.serverControl);
       await syncTraceSettings();
       await broadcastState(senderTabId);
       return { ok: true, settings };
@@ -675,6 +691,44 @@ async function handlePanelRequest(message: PanelRequest, senderTabId: number | n
       await extensionApi.storage.local.set({ [CONTRACTS_KEY]: message.contracts });
       return { ok: true, contracts: message.contracts };
 
+    /* ---------------------------------------------------------------- */
+    /* Instrumented server (control plane)                               */
+    /* ---------------------------------------------------------------- */
+
+    case 'server:sync': {
+      const result = await serverBridge.sync();
+      if (result.spans.length) {
+        // Server spans join the same store as browser traffic so traces,
+        // insights and evidence exports see one correlated journey.
+        store.addSpans(result.spans);
+        broadcast({ type: 'event:spans', spans: result.spans });
+      }
+      if (result.fresh.length || result.status.error) {
+        broadcast({ type: 'event:server', status: result.status, calls: result.fresh });
+      }
+      return { ok: true, serverStatus: result.status, calls: result.fresh };
+    }
+
+    case 'server:calls:get':
+      return { ok: true, serverStatus: serverBridge.status(), calls: serverBridge.snapshot() };
+
+    case 'server:calls:clear':
+      await serverBridge.clear();
+      await broadcastState(senderTabId);
+      return { ok: true, serverStatus: serverBridge.status(), calls: [] };
+
+    case 'server:rules:get':
+      return { ok: true, serverRules: serverBridge.serverRules() };
+
+    case 'server:rules:set': {
+      const stored = await serverBridge.pushRules(message.rules);
+      await broadcastState(senderTabId);
+      return { ok: true, serverRules: stored };
+    }
+
+    case 'server:test':
+      return { ok: true, serverHealth: await serverBridge.test({ ...settings.serverControl, enabled: true, url: message.url, token: message.token }) };
+
     default:
       return { ok: false, error: `Unsupported request "${(message as { type: string }).type}".` };
   }
@@ -745,6 +799,9 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
 /* ------------------------------------------------------------------ */
 
 extensionApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // Track the document as early as `changeInfo.url` (SPA route changes included)
+  // so calls fired during load already carry the right page.
+  if (tab.url && /^https?:/i.test(tab.url)) tabPageUrls.set(tabId, tab.url);
   if (changeInfo.status !== 'complete' || !/^https?:/i.test(tab.url ?? '')) return;
   void initialization.then(async () => {
     frameStatus.delete(tabId);
@@ -772,6 +829,7 @@ extensionApi.tabs.onRemoved.addListener((tabId) => {
   selfTests.delete(tabId);
   consoleMessages.delete(tabId);
   recentRequests.clear(tabId);
+  tabPageUrls.delete(tabId);
   void networkMock.disable(tabId);
 });
 

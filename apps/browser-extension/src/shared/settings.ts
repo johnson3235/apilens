@@ -25,6 +25,25 @@ export interface AgentSettings {
   autoReconnect: boolean;
 }
 
+/**
+ * Link to an application running the ApiLens server SDK.
+ *
+ * Unlike the agent, this reaches a *remote* dev deployment over HTTPS, which
+ * is the only way to observe server-side calls when the Next.js process is not
+ * on the tester's machine.
+ */
+export interface ServerControlSettings {
+  enabled: boolean;
+  /** App origin, or the full control mount such as `https://host/api/__apilens`. */
+  url: string;
+  /** Matches APILENS_CONTROL_TOKEN on the server. Never the agent token. */
+  token: string;
+  /** How often the panel asks the service worker to poll. */
+  pollIntervalMs: number;
+  /** Keep polling while the panel is closed. Off by default to save quota. */
+  pollInBackground: boolean;
+}
+
 export interface CaptureSettings {
   /** Record request/response bodies. Disabling reduces memory dramatically. */
   captureBodies: boolean;
@@ -43,6 +62,7 @@ export interface ExtensionSettings {
   traceHeaders: TraceHeaderConfig;
   retention: RetentionPolicy;
   agent: AgentSettings;
+  serverControl: ServerControlSettings;
   slowRequestMs: number;
 }
 
@@ -64,6 +84,13 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     port: DEFAULT_AGENT_PORT,
     token: '',
     autoReconnect: true,
+  },
+  serverControl: {
+    enabled: false,
+    url: '',
+    token: '',
+    pollIntervalMs: 2_000,
+    pollInBackground: false,
   },
   slowRequestMs: 1_000,
 };
@@ -97,6 +124,12 @@ export function mergeSettings(stored: unknown): ExtensionSettings {
     traceHeaders: { ...DEFAULT_SETTINGS.traceHeaders, ...raw.traceHeaders },
     retention: { ...DEFAULT_SETTINGS.retention, ...raw.retention },
     agent: { ...DEFAULT_SETTINGS.agent, ...raw.agent },
+    serverControl: {
+      ...DEFAULT_SETTINGS.serverControl,
+      ...raw.serverControl,
+      // Polling faster than this hammers a shared dev deployment.
+      pollIntervalMs: Math.max(1_000, raw.serverControl?.pollIntervalMs ?? DEFAULT_SETTINGS.serverControl.pollIntervalMs),
+    },
     slowRequestMs: raw.slowRequestMs ?? DEFAULT_SETTINGS.slowRequestMs,
   };
 }
