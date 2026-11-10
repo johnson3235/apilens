@@ -2,7 +2,7 @@ import type { ControlHealth, NextSDKOptions, ServerCall, ServerMockRule } from '
 export * from './types';
 export { DEFAULT_TEXT_CONTENT_TYPES } from './bodies';
 export { MIN_TOKEN_LENGTH } from './control';
-export declare const SDK_VERSION = "0.2.0";
+export declare const SDK_VERSION = "0.3.0";
 /**
  * Session id used when `captureWithoutSession` is on.
  *
@@ -56,6 +56,9 @@ export declare class ApiLensNextSDK {
     private servedControl;
     private relayFailures;
     private lastRelayError;
+    private readonly auto;
+    private requestHook;
+    private outgoingHook;
     /** Distinguishes a restarted server from an idle one in the extension. */
     readonly processId: string;
     readonly startedAt: number;
@@ -94,8 +97,31 @@ export declare class ApiLensNextSDK {
         DELETE: (request: Request) => Promise<Response>;
         OPTIONS: (request: Request) => Promise<Response>;
     };
-    /** Call from instrumentation.ts register(), and once per route to tolerate Next's fetch patching. */
+    /**
+     * Turns capture on for the whole server. Call once from `register()` in
+     * instrumentation.ts; no page, layout or route file needs to change.
+     */
+    install(): void;
+    /** Same as `install()`; kept for 0.2 integrations, which already call it at boot. */
     installFetch(): void;
+    /** Opens a capture context around one incoming request; never lets a failure reach the app. */
+    private onIncoming;
+    private autoContext;
+    /** Records the request once the response is done, off the request's critical path. */
+    private observe;
+    private worthRecording;
+    /**
+     * Captures a call made through Node's `http`/`https` client (axios, got…).
+     *
+     * Without a matching mock the caller gets the real `ClientRequest`, only
+     * observed: no listener is added, so Node's own handling of unread
+     * responses and unhandled errors is unchanged.
+     */
+    private onOutgoing;
+    private observeOutgoing;
+    /** A request answered (or failed, or rewritten) by a server mock rule. */
+    private mockedOutgoing;
+    private tapped;
     private instrumentedFetch;
     /** Preserves NextRequest and params context. */
     wrapRoute<R extends Request, C>(handler: (request: R, context: C) => Response | Promise<Response>): (request: R, context: C) => Promise<Response>;
@@ -133,6 +159,8 @@ export declare class ApiLensNextSDK {
     wrapRouteModule<T extends Record<string, unknown>>(handlers: T): T;
     private originAllowed;
     private decide;
+    /** Synchronous rule selection, for clients that must choose real or mocked when the request is created. */
+    private pick;
     private serveMock;
     /**
      * Rewrites a real upstream response for a `passthrough-mutate` rule.

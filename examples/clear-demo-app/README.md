@@ -22,11 +22,12 @@ The three backend calls behind billing:
 
 ## How it is wired
 
-- **`lib/apilens.ts`**: the SDK singleton. It is on only when `APILENS_ENABLED=true` and the token has 24+ characters.
-- **`app/myaccount/billing/page.tsx`**: the server-rendered page. Its data loading runs inside `apiLens.traceRender(...)`, so the render becomes a page call and its fetches become backend calls.
+- **`lib/apilens.ts`**: the SDK singleton and its whole configuration. It is on only when `APILENS_ENABLED=true` and the token has 24+ characters. `autoInstrument.ignorePaths` keeps the dummy services out of the incoming captures.
+- **`instrumentation.ts`**: calls `apiLens.install()` at boot. This is the only wiring: every page, route and server action is then captured automatically.
+- **`app/myaccount/billing/page.tsx`**: the server-rendered page. It contains no ApiLens code; its render shows up as a page call with its fetches as backend calls.
 - **`app/api/[...path]/route.ts`**: one route for every API path:
   - `/api/__apilens/*`: the ApiLens control endpoint, token-protected
-  - `/api/billing/*`: the BFF the Dashboard calls, wrapped with `wrapRoute`
+  - `/api/billing/*`: the BFF the Dashboard calls (plain handlers)
   - `/api/services/*`: the dummy backend services
 - **Relay**: on Vercel the billing page and the API route run as **separate functions with separate memory**. The SDK's `control.relay` (on automatically when `VERCEL=1`) makes the page function send its captured calls to the API function the extension polls, and read the mock rules from it.
 

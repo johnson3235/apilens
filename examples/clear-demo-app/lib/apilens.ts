@@ -43,4 +43,7 @@ export const apiLens = (processState.__clearDemoApiLens ??= new ApiLensNextSDK({
     bufferSize: 500,
     relay,
   },
+  // Every request is captured automatically. The fake services stand in for
+  // separate systems, so they show only as the backend calls the app makes.
+  autoInstrument: { ignorePaths: ['/api/services/'] },
 }));

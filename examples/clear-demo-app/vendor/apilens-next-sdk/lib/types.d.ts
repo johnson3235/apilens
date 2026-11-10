@@ -235,5 +235,31 @@ export interface NextSDKOptions {
     control?: ControlPlaneOptions;
     /** Allow mock rules to short-circuit incoming route handlers. Default false. */
     allowRouteMocks?: boolean;
+    /**
+     * Capture every incoming request (pages, Server Components, server actions,
+     * route handlers) and the backend calls it makes, with no application code
+     * beyond the `instrumentation.ts` boot hook. Default true; `false` restores
+     * the 0.2 behaviour where only `wrapRoute`/`traceRender` are captured.
+     */
+    autoInstrument?: boolean | AutoInstrumentOptions;
+    /**
+     * Also capture (and mock) calls sent through Node's `http`/`https` modules:
+     * axios, got, node-fetch, superagent, SOAP and most vendor SDKs. Global
+     * `fetch` is always covered. Default true.
+     */
+    captureNodeHttp?: boolean;
+}
+export interface AutoInstrumentOptions {
+    /**
+     * Extra paths never captured: a string is a path prefix. Next's own assets,
+     * HMR and the control endpoint are always skipped.
+     */
+    ignorePaths?: (string | RegExp)[];
+    /**
+     * Also record requests that made no backend call, such as plain page loads
+     * and router prefetches. Default false: those are noise in a QA session.
+     * API routes, non-GET requests and failures are always recorded.
+     */
+    recordAllRequests?: boolean;
 }
 //# sourceMappingURL=types.d.ts.map

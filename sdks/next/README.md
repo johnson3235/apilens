@@ -1,8 +1,40 @@
-# ApiLens Next SDK 0.2.0 — opt-in QA server tracing, payload capture and server mocking
+# ApiLens Next SDK 0.3.0 — opt-in QA server tracing, payload capture and server mocking
 
 Standalone Node 20+ package. No Next.js runtime dependency, no workspace dependencies, no Express custom server. This is a new adapter; `@apilens/node-sdk` is still the separate legacy Express/http SDK.
 
-## What is new in 0.2.0
+## What is new in 0.3.0: zero-touch capture
+
+One boot hook in `instrumentation.ts` now captures **every** incoming request (page renders, RSC payloads, Server Components, server actions and route handlers) together with the backend `fetch` calls it makes. Page, layout and route files never change. A new page is covered the moment it exists.
+
+| | 0.2.0 | 0.3.0 |
+|---|---|---|
+| Server-rendered pages | `traceRender` in every page | Automatic |
+| Route handlers | `wrapRoute` on every export | Automatic |
+| Server actions | Not captured | Automatic |
+| Choosing what is captured | Edit the code | `autoInstrument` config |
+| axios, got, node-fetch, superagent, SOAP/vendor SDKs (Node `http`/`https`) | Not captured | Automatic, including server mocks |
+
+How it works: `next start`, `next dev`, standalone output and custom servers all serve through Node's `http.Server`. The SDK hooks its `request` event once, opens a capture context per request, and the global `fetch` wrapper records every call made inside it. Request bodies are copied as Node's parser delivers them and response bodies as they are written, so application streams are never consumed. gzip/deflate/br responses are decoded for display.
+
+Backend calls are captured whichever client makes them: global `fetch`, or any library built on Node's `http`/`https` modules (axios, got, node-fetch, superagent, most vendor SDKs). For those clients:
+
+- **No matching mock:** the application gets the real `ClientRequest`, only observed. The SDK adds no event listeners, so Node's handling of unread responses and unhandled errors is unchanged.
+- **Mocks:** server mocks answer them too, with a stand-in request object. `network-error` surfaces as `ECONNREFUSED`, the way axios reports a refused connection.
+- **Limits:** rules that match on the request body (`bodyContains`) do not apply to these clients, because the choice between real and mocked is made when the request is created. The panel shows that reason. Turn this off with `captureNodeHttp: false`.
+
+Upgrading from 0.2.0 needs no code change: the existing `installFetch()` call turns automatic capture on. Existing `wrapRoute`/`traceRender` calls keep working. When one runs inside an automatically captured request, the call is recorded once.
+
+```ts
+autoInstrument: {
+  ignorePaths: ['/api/health', /^\/internal\//], // string = path prefix
+  recordAllRequests: false, // default: skip GET page loads that made no backend call
+},
+// autoInstrument: false restores the 0.2.0 behaviour.
+```
+
+Always skipped: `/_next/*`, Next dev tooling, static files, `favicon.ico` and the control endpoint. A request with no backend call is recorded only when it failed, was not a GET/HEAD (server actions, form posts) or is under `/api/`, unless `recordAllRequests` is on. Next's `_rsc` cache-buster is removed from recorded URLs, and HTML/RSC markup bodies are not captured.
+
+## What was new in 0.2.0
 
 | Capability | 0.1.0 | 0.2.0 |
 |---|---|---|
@@ -18,12 +50,12 @@ Existing 0.1.0 integrations keep working unchanged; every new capability is opt-
 
 ## What it captures
 
-- Incoming **wrapped App Router HTTP handlers** (GET/POST/PATCH/etc.) and native/global `fetch` calls executed within their async context.
+- **Every incoming Node-runtime request** (pages, Server Components, server actions, route handlers) and the native/global `fetch` calls executed while handling it.
 - Service, method, URL origin/path, redacted query values, status, timing, request/response headers (credential-like names masked), errors, session/scenario, parent/child trace IDs.
 - Optionally **request and response payloads**, read from a throwaway `clone()` so the application's own stream is never consumed, capped at `captureBodies.maxBytes`, and redacted before buffering.
 - Promise-based route params and NextRequest subclasses pass through unchanged.
 
-Server Components/SSR are captured where their data loading runs inside `traceRender` (see step 3b). Not automatic visibility into unwrapped Server Components, Server Actions, background jobs, Edge middleware, direct `http.request`, DB queries, third-party service internals, or calls made before instrumentation. Every relevant handler must be wrapped. Cached responses are observed as fetch invocations, not necessarily wire requests. Review URLs and diagnostic headers for application-specific PII before sharing.
+Not captured: Edge-runtime routes and middleware, background jobs outside a request, DB queries, gRPC/raw TCP clients, third-party service internals, and the first request a dev server handles before `register()` has run. Cached responses are observed as fetch invocations, not necessarily wire requests. Review URLs and diagnostic headers for application-specific PII before sharing.
 
 ## Choosing a transport
 
@@ -44,7 +76,7 @@ cd sdks/next
 pnpm pack
 ```
 
-This creates `apilens-next-sdk-0.2.0.tgz`. Copy that tarball to an approved artifact location available to CLEAR-APP (and its CI). It contains compiled JS and TypeScript declarations; no `workspace:*` install is needed. It is not published to npm. Install using the project's Yarn version, for example `yarn add file:./vendor/apilens-next-sdk-0.2.0.tgz` if vendor artifacts are permitted. Do not reference a developer-only absolute path in a committed lockfile.
+This creates `apilens-next-sdk-0.3.0.tgz`. Copy that tarball to an approved artifact location available to CLEAR-APP (and its CI). It contains compiled JS and TypeScript declarations; no `workspace:*` install is needed. It is not published to npm. Install using the project's Yarn version, for example `yarn add file:./vendor/apilens-next-sdk-0.3.0.tgz` if vendor artifacts are permitted. Do not reference a developer-only absolute path in a committed lockfile.
 
 ## CLEAR-APP integration (FE change required)
 
@@ -104,14 +136,18 @@ Merge into `src/instrumentation.ts` (or the appropriate existing instrumentation
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
     const { apiLens } = await import('./lib/apilens.server');
-    apiLens.installFetch();
+    apiLens.install();
   }
 }
 ```
 
-Preserve existing register logic. Follow the target Next version's instrumentation configuration (the repository's Next 14 demo enables `experimental.instrumentationHook`). This boot hook alone does not create a request context. Do not use `src/middleware.ts`, which the FE team identified as Edge.
+Preserve existing register logic. Follow the target Next version's instrumentation configuration (the repository's Next 14 demo enables `experimental.instrumentationHook`). Do not use `src/middleware.ts`, which the FE team identified as Edge.
 
-### 3. Wrap every HTTP export
+**This is the whole integration.** Every page, Server Component, server action and route handler is now captured with its backend calls. Do not edit page, layout or route files. Steps 3 and 3b below are optional refinements.
+
+### 3. Optional: wrap a route explicitly
+
+Only needed for `allowRouteMocks` (mocking the incoming route itself) or with `autoInstrument: false`:
 
 ```ts
 import { apiLens } from '@/lib/apilens.server';
@@ -130,11 +166,11 @@ For a route file with several verbs, wrap them together:
 export const { GET, POST, PATCH } = apiLens.wrapRouteModule({ GET: handleGET, POST: handlePOST, PATCH: handlePATCH });
 ```
 
-Keep route params/context signatures and existing runtime declarations; do not convert an Edge route to Node without FE approval. Inventory all HTTP exports in the 32 FE-reported routes and explicitly report any route not covered.
+Keep route params/context signatures and existing runtime declarations; do not convert an Edge route to Node without FE approval.
 
-### 3b. Server-rendered pages
+### 3b. Optional: `traceRender` for a page's loaded data
 
-When a page loads its data in a Server Component, the browser makes no API call: the backend calls happen on the server while the page is built. Route wrapping cannot see them because there is no Request to wrap. Run the loading inside `traceRender`:
+Server-rendered pages are captured automatically. `traceRender` adds one thing: the data a page loaded becomes the page call's *Received* body. It also works with `autoInstrument: false`:
 
 ```ts
 // src/app/myaccount/billing/page.tsx  (a Server Component)

@@ -1,7 +1,8 @@
 ﻿import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes } from 'node:crypto';
-import { request as httpRequest } from 'node:http';
+import type { ClientRequest, IncomingMessage, ServerResponse } from 'node:http';
 import {
+  captureBytes,
   captureInitBody,
   captureMessageBody,
   resolveBodyCapture,
@@ -11,10 +12,18 @@ import {
 } from './bodies';
 import { CallBuffer } from './buffer';
 import { buildRulesRevision, createControlHandler, isTokenAcceptable, MIN_TOKEN_LENGTH } from './control';
+import {
+  BodyTap, clearRequestHook, decodeBody, nodeHeaders, setRequestHook, tapRequest, tapWrites, trackResponseHeaders, type RequestHook,
+} from './incoming';
+import {
+  clearOutgoingHook, MockedClientRequest, realResponse, setOutgoingHook, simulatedConnectionError, unpatchedHttpRequest,
+  type OutgoingCall, type OutgoingHook,
+} from './outgoing';
 import { applyFieldMutations, buildMockResponse, headerSafe, MockNetworkError, sanitizeRule, selectMockRule } from './mocks';
 import { redactHeaders, safeUrlParts } from './redaction';
 import { CONTROL_PROTOCOL_VERSION } from './types';
 import type {
+  AutoInstrumentOptions,
   CapturedBody,
   ControlHealth,
   MockSkipReason,
@@ -27,7 +36,7 @@ export * from './types';
 export { DEFAULT_TEXT_CONTENT_TYPES } from './bodies';
 export { MIN_TOKEN_LENGTH } from './control';
 
-export const SDK_VERSION = '0.2.0';
+export const SDK_VERSION = '0.3.0';
 
 /**
  * Session id used when `captureWithoutSession` is on.
@@ -51,9 +60,36 @@ interface Context {
   sessionId: string; scenarioId?: string; traceId: string; spanId: string;
   /** Control endpoint to forward captures to, when this process relays (serverless). */
   relayTo: string | null;
+  /** Set when the context was opened automatically for an incoming request. */
+  auto?: AutoRequest;
 }
+
+interface AutoRequest {
+  method: string; url: string; headers: Headers; parentSpanId: string | null;
+  /** Outgoing calls made while handling it; requests with none are usually noise. */
+  outbound: number;
+  /** A `wrapRoute`/`traceRender` inside it records the call instead, with richer detail. */
+  claimed: boolean;
+  /** Relay rules are fetched once, and only when a call actually needs them. */
+  rules?: Promise<void>;
+}
+
 const id = (bytes: number) => randomBytes(bytes).toString('hex');
 const safeId = (value: string | null): string | undefined => value && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value) ? value : undefined;
+
+function parseTraceparent(value: string | null): { traceId: string; spanId: string } | null {
+  const parent = /^00-([a-f0-9]{32})-([a-f0-9]{16})-([a-f0-9]{2})$/.exec(value ?? '');
+  return parent && !/^0+$/.test(parent[1]!) && !/^0+$/.test(parent[2]!) ? { traceId: parent[1]!, spanId: parent[2]! } : null;
+}
+
+/** Next's assets, dev tooling and the SDK's own control endpoint are never QA traffic. */
+const ALWAYS_IGNORED = /^\/(?:_next\/|__nextjs|api\/(?:__|%5F_)apilens(?:\/|$)|favicon\.ico$)|\.(?:js|mjs|css|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|otf|txt|xml|webmanifest)$/i;
+
+/** Page markup and RSC payloads are not data a tester inspects. */
+const MARKUP_TYPES = /^(?:text\/html|text\/x-component)\b/i;
+
+const isNextPatched = (candidate: typeof fetch): boolean =>
+  (candidate as typeof fetch & { __nextPatched?: boolean }).__nextPatched === true;
 
 export function safeHeaders(headers: Headers): Record<string, string> {
   return redactHeaders(headers);
@@ -118,7 +154,7 @@ class Reporter {
 
   private send(body: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const request = httpRequest(this.endpoint!, { method: 'POST', headers: {
+      const request = unpatchedHttpRequest()(this.endpoint!, { method: 'POST', headers: {
         authorization: `Bearer ${this.options.agentToken}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
       } }, (response) => {
         response.resume();
@@ -162,6 +198,9 @@ export class ApiLensNextSDK {
   private servedControl = false;
   private relayFailures = 0;
   private lastRelayError: string | null = null;
+  private readonly auto: AutoInstrumentOptions | null;
+  private requestHook: RequestHook | null = null;
+  private outgoingHook: OutgoingHook | null = null;
 
   /** Distinguishes a restarted server from an idle one in the extension. */
   readonly processId = id(8);
@@ -189,6 +228,7 @@ export class ApiLensNextSDK {
     this.bodyCapture = resolveBodyCapture(options.captureBodies);
     this.buffer = new CallBuffer(Math.max(50, Math.min(options.control?.bufferSize ?? 500, 5_000)));
     this.reporter = new Reporter(options);
+    this.auto = options.autoInstrument === false ? null : options.autoInstrument === true || !options.autoInstrument ? {} : options.autoInstrument;
 
     this.control = options.control?.enabled
       ? createControlHandler({
@@ -284,9 +324,28 @@ export class ApiLensNextSDK {
     return { GET: handle, POST: handle, PUT: handle, DELETE: handle, OPTIONS: handle };
   }
 
-  /** Call from instrumentation.ts register(), and once per route to tolerate Next's fetch patching. */
+  /**
+   * Turns capture on for the whole server. Call once from `register()` in
+   * instrumentation.ts; no page, layout or route file needs to change.
+   */
+  install(): void {
+    this.installFetch();
+  }
+
+  /** Same as `install()`; kept for 0.2 integrations, which already call it at boot. */
   installFetch(): void {
-    if (!this.enabled || globalThis.fetch === this.wrapper) return;
+    if (!this.enabled) return;
+    if (this.auto && !this.requestHook) {
+      this.requestHook = (req, res, dispatch) => this.onIncoming(req, res, dispatch);
+      setRequestHook(this.requestHook);
+    }
+    if (this.options.captureNodeHttp !== false && !this.outgoingHook) {
+      this.outgoingHook = (call, original) => this.onOutgoing(call, original);
+      setOutgoingHook(this.outgoingHook);
+    }
+    // Next wraps fetch once and marks it; wrapping on top of that again would
+    // make Next wrap again, growing the chain on every request.
+    if (globalThis.fetch === this.wrapper || (this.wrapper && isNextPatched(globalThis.fetch))) return;
     const downstream = globalThis.fetch;
     const sdk = this;
     this.downstream = downstream;
@@ -296,6 +355,231 @@ export class ApiLensNextSDK {
       return sdk.insideFetch.run(true, () => sdk.instrumentedFetch(downstream, ctx, input, init));
     };
     globalThis.fetch = this.wrapper;
+  }
+
+  /** Opens a capture context around one incoming request; never lets a failure reach the app. */
+  private onIncoming(req: IncomingMessage, res: ServerResponse, dispatch: () => boolean): boolean {
+    let ctx: Context | null = null;
+    try {
+      ctx = this.enabled ? this.autoContext(req) : null;
+    } catch {
+      ctx = null;
+    }
+    if (!ctx) return dispatch();
+    const opened = ctx;
+    return this.contexts.run(opened, () => {
+      try { this.observe(opened, req, res); } catch { /* capture is best-effort */ }
+      return dispatch();
+    });
+  }
+
+  private autoContext(req: IncomingMessage): Context | null {
+    const rawPath = req.url ?? '/';
+    const pathname = rawPath.split('?')[0]!;
+    if (ALWAYS_IGNORED.test(pathname) || this.auto?.ignorePaths?.some((rule) =>
+      typeof rule === 'string' ? pathname.startsWith(rule) : rule.test(pathname))) return null;
+
+    const headers = nodeHeaders(req.headers);
+    const sessionId = safeId(headers.get('x-qa-session-id')) ?? (this.options.captureWithoutSession ? AMBIENT_SESSION_ID : undefined);
+    if (!sessionId) return null;
+
+    const parsed = new URL(renderUrl(rawPath, headers));
+    parsed.searchParams.delete('_rsc'); // Next's cache-buster, not part of the page address.
+    const url = parsed.toString();
+    if (!this.originAllowed(url)) return null;
+    this.installFetch();
+
+    const parent = parseTraceparent(headers.get('traceparent'));
+    return {
+      sessionId,
+      scenarioId: safeId(headers.get('x-test-scenario-id')),
+      traceId: parent?.traceId ?? id(16),
+      spanId: id(8),
+      relayTo: this.relayTarget(url),
+      auto: { method: (req.method ?? 'GET').toUpperCase(), url, headers, parentSpanId: parent?.spanId ?? null, outbound: 0, claimed: false },
+    };
+  }
+
+  /** Records the request once the response is done, off the request's critical path. */
+  private observe(ctx: Context, req: IncomingMessage, res: ServerResponse): void {
+    const auto = ctx.auto!;
+    const startedAt = Date.now();
+    const cap = this.bodyCapture.maxBytes;
+    const requestTap = this.bodyCapture.request && cap > 0 ? tapRequest(req, cap) : null;
+    const responseTap = this.bodyCapture.response && cap > 0 ? tapWrites(res, cap) : null;
+    const sentHeaders = trackResponseHeaders(res);
+
+    let settled = false;
+    const finish = (aborted: boolean) => {
+      if (settled) return;
+      settled = true;
+      const statusCode = aborted && !res.headersSent ? null : res.statusCode;
+      if (auto.claimed || !this.worthRecording(auto, statusCode, aborted)) return;
+      const responseHeaders = sentHeaders();
+      this.track(this.finishRecord({
+        ctx, spanId: ctx.spanId, parentSpanId: auto.parentSpanId, kind: 'server', method: auto.method, url: auto.url, startedAt,
+        statusCode, requestHeaders: auto.headers, responseHeaders,
+        error: aborted ? 'ClientAborted' : null,
+        requestCapture: requestTap ? Promise.resolve(this.tapped(requestTap, auto.headers)) : null,
+        responseCapture: responseTap ? Promise.resolve(this.tapped(responseTap, responseHeaders)) : null,
+        mockedBy: null, skipped: [],
+      }));
+    };
+    res.once('finish', () => finish(false));
+    res.once('close', () => finish(!res.writableFinished));
+  }
+
+  private worthRecording(auto: AutoRequest, statusCode: number | null, aborted: boolean): boolean {
+    if (this.auto?.recordAllRequests || auto.outbound > 0 || aborted || statusCode === null || statusCode >= 400) return true;
+    if (auto.method !== 'GET' && auto.method !== 'HEAD') return true; // server actions, form posts, mutations
+    try { return new URL(auto.url).pathname.startsWith('/api/'); } catch { return false; }
+  }
+
+  /**
+   * Captures a call made through Node's `http`/`https` client (axios, got…).
+   *
+   * Without a matching mock the caller gets the real `ClientRequest`, only
+   * observed: no listener is added, so Node's own handling of unread
+   * responses and unhandled errors is unchanged.
+   */
+  private onOutgoing(call: OutgoingCall, original: (...args: unknown[]) => ClientRequest): ClientRequest {
+    const ctx = this.contexts.getStore();
+    // insideFetch: a fetch polyfill built on http.request is already being captured.
+    if (!this.enabled || !ctx || this.insideFetch.getStore()) return original(...call.args);
+
+    const spanId = id(8);
+    const startedAt = Date.now();
+    let decision: { rule: ServerMockRule | null; skipped: MockSkipReason[] } = { rule: null, skipped: [] };
+    try {
+      if (ctx.auto) {
+        ctx.auto.outbound += 1;
+        // Cannot wait here, so the first call of a relayed request uses the rules already held.
+        if (ctx.relayTo) ctx.auto.rules ??= this.pullRules(ctx.relayTo);
+      }
+      decision = this.pick('client', call.method, call.url, call.headers, ctx, null);
+    } catch {
+      decision = { rule: null, skipped: [] };
+    }
+
+    if (decision.rule) return this.mockedOutgoing(decision.rule, decision.skipped, call, original, ctx, spanId, startedAt) as unknown as ClientRequest;
+
+    const request = original(...call.args);
+    try {
+      this.observeOutgoing(request, call, ctx, spanId, startedAt, decision.skipped);
+    } catch {
+      // Capture is best-effort; the request itself is already on its way.
+    }
+    return request;
+  }
+
+  private observeOutgoing(
+    request: ClientRequest, call: OutgoingCall, ctx: Context, spanId: string, startedAt: number, skipped: MockSkipReason[],
+  ): void {
+    try {
+      if (this.propagate.has(new URL(call.url).origin) && !request.headersSent) {
+        request.setHeader('traceparent', `00-${ctx.traceId}-${spanId}-01`);
+        request.setHeader('x-qa-session-id', ctx.sessionId);
+        if (ctx.scenarioId) request.setHeader('x-test-scenario-id', ctx.scenarioId);
+      }
+    } catch {
+      // A URL that does not parse never matches a propagation origin.
+    }
+
+    const cap = this.bodyCapture.maxBytes;
+    const requestTap = this.bodyCapture.request && cap > 0 ? tapWrites(request, cap) : null;
+    const tapResponses = this.bodyCapture.response && cap > 0;
+    let responseTap: BodyTap | null = null;
+    let response: IncomingMessage | null = null;
+    // Snapshot on arrival: clients such as axios delete content-encoding once they decompress.
+    let responseHeaders: Headers | null = null;
+    let settled = false;
+
+    const finish = (error: string | null) => {
+      if (settled) return;
+      settled = true;
+      const requestHeaders = nodeHeaders(request.getHeaders());
+      this.track(this.finishRecord({
+        ctx, spanId, parentSpanId: ctx.spanId, kind: 'client', method: call.method, url: call.url, startedAt,
+        statusCode: response?.statusCode ?? null, requestHeaders, responseHeaders, error,
+        requestCapture: requestTap ? Promise.resolve(this.tapped(requestTap, requestHeaders, false)) : null,
+        responseCapture: responseTap && responseHeaders ? Promise.resolve(this.tapped(responseTap, responseHeaders, false)) : null,
+        mockedBy: null, skipped,
+      }));
+    };
+
+    // Events are observed by wrapping emit: adding listeners would change how
+    // Node treats an unread response or an unhandled error.
+    const emitRequest = request.emit;
+    request.emit = function apiLensRequestEmit(this: ClientRequest, event: string | symbol, ...args: unknown[]) {
+      try {
+        if (event === 'response' && !response) {
+          response = args[0] as IncomingMessage;
+          responseHeaders = nodeHeaders(response.headers);
+          if (tapResponses) responseTap = tapRequest(response, cap);
+          const emitResponse = response.emit;
+          response.emit = function apiLensResponseEmit(this: IncomingMessage, inner: string | symbol, ...innerArgs: unknown[]) {
+            try {
+              if (inner === 'end') finish(null);
+              else if (inner === 'error') finish(errorName(innerArgs[0]));
+              else if (inner === 'close' || inner === 'aborted') finish(this.complete ? null : 'ResponseAborted');
+            } catch { /* never break the response */ }
+            return emitResponse.call(this, inner, ...innerArgs);
+          } as IncomingMessage['emit'];
+        } else if (event === 'error') {
+          finish(errorName(args[0]));
+        } else if (event === 'close' && !response) {
+          finish('RequestAborted');
+        }
+      } catch { /* never break the request */ }
+      return emitRequest.call(this, event, ...args);
+    } as ClientRequest['emit'];
+  }
+
+  /** A request answered (or failed, or rewritten) by a server mock rule. */
+  private mockedOutgoing(
+    rule: ServerMockRule, skipped: MockSkipReason[], call: OutgoingCall, original: (...args: unknown[]) => ClientRequest,
+    ctx: Context, spanId: string, startedAt: number,
+  ): MockedClientRequest {
+    const request: MockedClientRequest = new MockedClientRequest(call, async (body, signal) => {
+      const headers = request.currentHeaders();
+      const cap = this.bodyCapture.maxBytes;
+      const requestCapture = this.bodyCapture.request && cap > 0
+        ? Promise.resolve(captureBytes(body.subarray(0, cap), body.byteLength > cap, headers.get('content-type'), this.bodyCapture))
+        : null;
+      const real = () => realResponse(original, call, body, signal);
+
+      if (rule.action.type === 'passthrough-mutate') {
+        let upstream: Response;
+        try {
+          upstream = await real();
+        } catch (cause) {
+          this.track(this.finishRecord({
+            ctx, spanId, parentSpanId: ctx.spanId, kind: 'client', method: call.method, url: call.url, startedAt,
+            statusCode: null, requestHeaders: headers, responseHeaders: null, error: errorName(cause),
+            requestCapture, responseCapture: null, mockedBy: null, skipped,
+          }));
+          throw cause;
+        }
+        return this.mutatePassthrough(rule, skipped, upstream, ctx, spanId, call.method, call.url, headers, startedAt, requestCapture);
+      }
+
+      try {
+        return await this.serveMock(rule, skipped, ctx, spanId, call.method, call.url, headers, startedAt, requestCapture, signal, real);
+      } catch (cause) {
+        throw cause instanceof MockNetworkError ? simulatedConnectionError(cause.ruleName) : cause;
+      }
+    });
+    return request;
+  }
+
+  private tapped(tap: BodyTap, headers: Headers, skipMarkup = true): CaptureOutcome {
+    if (tap.size === 0) return { body: null, omitted: tap.truncated ? 'Body capture cap is 0 bytes' : null };
+    const contentType = headers.get('content-type');
+    if (skipMarkup && contentType && MARKUP_TYPES.test(contentType)) return { body: null, omitted: 'Not captured: page markup' };
+    const encoding = headers.get('content-encoding');
+    const decoded = decodeBody(tap.bytes(), encoding, this.bodyCapture.maxBytes);    if (!decoded) return { body: null, omitted: `Not captured: ${encoding} body could not be decoded` };
+    const truncated = tap.truncated || decoded.byteLength > this.bodyCapture.maxBytes;
+    return captureBytes(decoded.subarray(0, this.bodyCapture.maxBytes), truncated, contentType, this.bodyCapture);
   }
 
   private async instrumentedFetch(
@@ -311,6 +595,10 @@ export class ApiLensNextSDK {
     const spanId = id(8);
     const startedAt = Date.now();
     const signal = init?.signal ?? requestInput?.signal ?? null;
+    if (ctx.auto) {
+      ctx.auto.outbound += 1;
+      if (ctx.relayTo) await (ctx.auto.rules ??= this.pullRules(ctx.relayTo));
+    }
 
     // Cloning happens before the request is dispatched; the caller's own body
     // stream is never touched.
@@ -375,12 +663,13 @@ export class ApiLensNextSDK {
       const sessionId = headerSession ?? (this.options.captureWithoutSession ? AMBIENT_SESSION_ID : undefined);
       if (!this.enabled || !sessionId || !this.originAllowed(request.url)) return handler(request, context);
       this.installFetch();
+      const outer = this.contexts.getStore();
+      if (outer?.auto) outer.auto.claimed = true;
 
-      const parent = /^00-([a-f0-9]{32})-([a-f0-9]{16})-([a-f0-9]{2})$/.exec(request.headers.get('traceparent') ?? '');
-      const validParent = parent && !/^0+$/.test(parent[1]!) && !/^0+$/.test(parent[2]!) ? parent : null;
+      const validParent = parseTraceparent(request.headers.get('traceparent'));
       const relayTo = this.relayTarget(request.url);
       if (relayTo) await this.pullRules(relayTo);
-      const ctx: Context = { sessionId, scenarioId: safeId(request.headers.get('x-test-scenario-id')), traceId: validParent?.[1] ?? id(16), spanId: id(8), relayTo };
+      const ctx: Context = { sessionId, scenarioId: safeId(request.headers.get('x-test-scenario-id')), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo };
       const startedAt = Date.now();
       const method = request.method.toUpperCase();
 
@@ -409,7 +698,7 @@ export class ApiLensNextSDK {
         } finally {
           const responseCapture = response && this.bodyCapture.response ? captureMessageBody(response, this.bodyCapture) : null;
           this.track(this.finishRecord({
-            ctx, spanId: ctx.spanId, parentSpanId: validParent?.[2] ?? null, kind: 'server', method,
+            ctx, spanId: ctx.spanId, parentSpanId: validParent?.spanId ?? null, kind: 'server', method,
             url: request.url, startedAt, statusCode: response?.status ?? null,
             requestHeaders: request.headers, responseHeaders: response?.headers ?? null,
             error, requestCapture, responseCapture, mockedBy: null, skipped: [],
@@ -447,18 +736,20 @@ export class ApiLensNextSDK {
     const incoming = options.headers ?? null;
     const headerSession = safeId(incoming?.get('x-qa-session-id') ?? null);
     const sessionId = headerSession ?? (this.options.captureWithoutSession ? AMBIENT_SESSION_ID : undefined);
-    // Nested renders (a layout and its page, say) stay one page call.
-    if (!this.enabled || !sessionId || this.contexts.getStore()) return render();
+    // Nested renders (a layout and its page, say) stay one page call. An
+    // automatic request context is the exception: the explicit call refines it.
+    const outer = this.contexts.getStore();
+    if (!this.enabled || !sessionId || (outer && !outer.auto)) return render();
 
     const url = renderUrl(options.path, incoming);
     if (!this.originAllowed(url)) return render();
     this.installFetch();
+    if (outer?.auto) outer.auto.claimed = true;
 
-    const parent = /^00-([a-f0-9]{32})-([a-f0-9]{16})-([a-f0-9]{2})$/.exec(incoming?.get('traceparent') ?? '');
-    const validParent = parent && !/^0+$/.test(parent[1]!) && !/^0+$/.test(parent[2]!) ? parent : null;
+    const validParent = parseTraceparent(incoming?.get('traceparent') ?? null);
     const relayTo = this.relayTarget(url);
     if (relayTo) await this.pullRules(relayTo);
-    const ctx: Context = { sessionId, scenarioId: safeId(incoming?.get('x-test-scenario-id') ?? null), traceId: validParent?.[1] ?? id(16), spanId: id(8), relayTo };
+    const ctx: Context = { sessionId, scenarioId: safeId(incoming?.get('x-test-scenario-id') ?? null), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo };
     const method = (options.method ?? 'GET').toUpperCase();
     const startedAt = Date.now();
 
@@ -486,7 +777,7 @@ export class ApiLensNextSDK {
             ? captureMessageBody(new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } }), this.bodyCapture)
             : null;
           this.track(this.finishRecord({
-            ctx, spanId: ctx.spanId, parentSpanId: validParent?.[2] ?? null, kind: 'server', method, url, startedAt,
+            ctx, spanId: ctx.spanId, parentSpanId: validParent?.spanId ?? null, kind: 'server', method, url, startedAt,
             statusCode, requestHeaders: incoming ? new Headers(incoming) : new Headers(), responseHeaders: null,
             error, requestCapture: null, responseCapture, mockedBy: null, skipped: [],
           }));
@@ -532,7 +823,19 @@ export class ApiLensNextSDK {
     // The body is only materialised when a rule actually needs it.
     const needsBody = active.some((rule) => Boolean(rule.match.bodyContains));
     const bodyText = needsBody ? (await settleCapture(requestCapture, 1_000)).body?.content ?? null : null;
+    return this.pick(kind, method, url, headers, ctx, bodyText);
+  }
 
+  /** Synchronous rule selection, for clients that must choose real or mocked when the request is created. */
+  private pick(
+    kind: 'client' | 'server',
+    method: string,
+    url: string,
+    headers: Headers,
+    ctx: Context,
+    bodyText: string | null,
+  ): { rule: ServerMockRule | null; skipped: MockSkipReason[] } {
+    if (!this.rules.some((rule) => rule.enabled)) return { rule: null, skipped: [] };
     const decision = selectMockRule(this.rules, { kind, method, url, headers, bodyText, sessionId: ctx.sessionId });
     if (decision.rule) {
       decision.rule.appliedCount += 1;
@@ -806,6 +1109,10 @@ export class ApiLensNextSDK {
   async shutdown(): Promise<void> {
     await this.flush();
     this.stopped = true;
+    if (this.requestHook) clearRequestHook(this.requestHook);
+    this.requestHook = null;
+    if (this.outgoingHook) clearOutgoingHook(this.outgoingHook);
+    this.outgoingHook = null;
     if (globalThis.fetch === this.wrapper && this.downstream) globalThis.fetch = this.downstream;
     await this.reporter.shutdown();
   }
@@ -873,6 +1180,13 @@ function renderUrl(path: string, headers: Headers | null): string {
   } catch {
     return `http://localhost${pathPart}`;
   }
+}
+
+/** A short, non-sensitive label for a failure: the system error code when there is one. */
+function errorName(cause: unknown): string {
+  const code = (cause as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && /^[A-Z0-9_]{2,40}$/.test(code)) return code;
+  return cause instanceof Error ? cause.name : 'RequestError';
 }
 
 /** Data a page loaded (JSON-safe), as opposed to rendered React output. */

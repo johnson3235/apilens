@@ -222,6 +222,22 @@ export async function captureInitBody(
   }
 }
 
+/** Captures bytes already copied off a stream, such as a tapped Node request or response. */
+export function captureBytes(
+  bytes: Uint8Array,
+  truncated: boolean,
+  contentType: string | null,
+  config: BodyCaptureConfig,
+): CaptureOutcome {
+  if (config.maxBytes === 0) return { body: null, omitted: 'Body capture cap is 0 bytes' };
+  if (bytes.byteLength === 0 && !truncated) return NOT_CAPTURED;
+  const classification = classifyContentType(contentType, config);
+  if (classification === 'skip') {
+    return { body: null, omitted: `Not captured: ${contentType ?? 'unknown content type'} is treated as binary` };
+  }
+  return { body: finalise(bytes, truncated, contentType, classification, config), omitted: null };
+}
+
 /** Waits for a capture without ever delaying the application request. */
 export async function settleCapture(
   capture: Promise<CaptureOutcome> | null,

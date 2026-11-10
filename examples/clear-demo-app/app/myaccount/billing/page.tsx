@@ -1,6 +1,5 @@
 import { headers } from 'next/headers';
 import type { ReactNode } from 'react';
-import { apiLens } from '@/lib/apilens';
 import { servicesBase } from '@/lib/bff';
 import { isValidContactId, loadBillingPage, type Loaded } from '@/lib/billing';
 import { DEFAULT_CONTACT_ID } from '@/lib/demo-data';
@@ -10,6 +9,7 @@ import { euro, shortDate } from '@/lib/format';
  * Server-rendered billing page, like the real feature: the three backend
  * calls happen on the server while the page is built, so the browser makes
  * no API calls at all — ApiLens shows them under Server API, not Network.
+ * Nothing here knows about ApiLens: instrumentation.ts captures every page.
  */
 
 export const runtime = 'nodejs';
@@ -27,10 +27,7 @@ export default async function BillingPage({ searchParams }: { searchParams: { co
   const incoming = headers() as unknown as Headers;
   const pageUrl = `/myaccount/billing?contactId=${contactId}`;
 
-  const { amountDue, nextBill, history } = await apiLens.traceRender(
-    { path: pageUrl, headers: incoming },
-    () => loadBillingPage(servicesBase(requestOrigin(incoming)), contactId),
-  );
+  const { amountDue, nextBill, history } = await loadBillingPage(servicesBase(requestOrigin(incoming)), contactId);
 
   return (
     <>

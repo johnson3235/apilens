@@ -1,4 +1,3 @@
-import { apiLens } from './apilens';
 import { BackendError, isValidContactId, loadAmountDue, loadBillHistory, loadNextBill } from './billing';
 import { DEFAULT_CONTACT_ID } from './demo-data';
 
@@ -10,8 +9,9 @@ import { DEFAULT_CONTACT_ID } from './demo-data';
  *   GET /api/billing/next-bill?contactId=…   → billing service
  *   GET /api/billing/history?contactId=…     → invoices service
  *
- * Wrapped with the SDK, so ApiLens shows each as a page call with its backend
- * call underneath, and server mocks can change what the backend answers.
+ * Plain handlers: the SDK captures each request and its backend call on its
+ * own (see instrumentation.ts), and server mocks can change what the backend
+ * answers.
  */
 
 export function servicesBase(origin: string): string {
@@ -19,7 +19,7 @@ export function servicesBase(origin: string): string {
 }
 
 function endpoint<T>(load: (base: string, contactId: string) => Promise<T>) {
-  return apiLens.wrapRoute(async (request: Request) => {
+  return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const contactId = url.searchParams.get('contactId') ?? DEFAULT_CONTACT_ID;
     if (!isValidContactId(contactId)) return Response.json({ error: 'contactId must be digits only' }, { status: 400 });
@@ -31,10 +31,10 @@ function endpoint<T>(load: (base: string, contactId: string) => Promise<T>) {
       }
       return Response.json({ error: 'Something went wrong on the server.' }, { status: 500 });
     }
-  });
+  };
 }
 
-const ROUTES: Record<string, (request: Request, context: unknown) => Promise<Response>> = {
+const ROUTES: Record<string, (request: Request) => Promise<Response>> = {
   'amount-due': endpoint(loadAmountDue),
   'next-bill': endpoint(loadNextBill),
   history: endpoint(loadBillHistory),
@@ -44,5 +44,5 @@ export function bff(method: string, segments: string[], request: Request): Promi
   const handler = segments.length === 1 ? ROUTES[segments[0]!] : undefined;
   if (!handler) return Response.json({ error: 'Not found' }, { status: 404 });
   if (method !== 'GET') return Response.json({ error: 'Method not allowed' }, { status: 405 });
-  return handler(request, undefined);
+  return handler(request);
 }

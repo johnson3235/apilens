@@ -2,9 +2,9 @@
 
 ## Requested change
 
-Integrate **`@apilens/next-sdk@0.2.0`** in the Node runtime of CLEAR-APP. Do **not** install the legacy `@apilens/node-sdk`: it is an Express/http adapter, not the App Router adapter.
+Integrate **`@apilens/next-sdk@0.3.0`** in the Node runtime of CLEAR-APP. Do **not** install the legacy `@apilens/node-sdk`: it is an Express/http adapter, not the App Router adapter.
 
-The new SDK records wrapped App Router HTTP handlers and native/global `fetch` calls made inside their QA context. It records service, method, URL origin/path, status, timing, sanitized headers, errors, parent/child trace IDs and — new in 0.2.0 — **bounded, redacted request and response payloads**. It can also apply **server-side mock rules** to upstream calls, and expose an authenticated **in-app control plane** so a tester can inspect a remote dev deployment that a loopback agent cannot reach.
+The SDK records every incoming Node-runtime request (pages, Server Components, server actions, route handlers) and the backend calls made while handling it, whether through global `fetch` or a Node `http`/`https` client such as axios, with no changes to application files. It records service, method, URL origin/path, status, timing, sanitized headers, errors, parent/child trace IDs and — new in 0.2.0 — **bounded, redacted request and response payloads**. It can also apply **server-side mock rules** to upstream calls, and expose an authenticated **in-app control plane** so a tester can inspect a remote dev deployment that a loopback agent cannot reach.
 
 It does not capture DB queries, Server Actions/SSR, background jobs, direct `http.request`, Edge execution or downstream service internals automatically. Cached fetch results are not proof of an actual backend network call.
 
@@ -30,12 +30,12 @@ cd sdks/next
 pnpm pack
 ```
 
-Output: `sdks/next/apilens-next-sdk-0.2.0.tgz`. Generated dist/tarballs are not committed; a GitHub source checkout must be built. This package is not published to npm and has no runtime or `workspace:*` dependencies.
+Output: `sdks/next/apilens-next-sdk-0.3.0.tgz`. Generated dist/tarballs are not committed; a GitHub source checkout must be built. This package is not published to npm and has no runtime or `workspace:*` dependencies.
 
-Make the artifact available through the team's approved distribution process. If checked-in vendor artifacts are allowed, put it at `CLEAR-APP/vendor/apilens-next-sdk-0.2.0.tgz`, then use the project's Yarn version:
+Make the artifact available through the team's approved distribution process. If checked-in vendor artifacts are allowed, put it at `CLEAR-APP/vendor/apilens-next-sdk-0.3.0.tgz`, then use the project's Yarn version:
 
 ```powershell
-yarn add file:./vendor/apilens-next-sdk-0.2.0.tgz
+yarn add file:./vendor/apilens-next-sdk-0.3.0.tgz
 ```
 
 Keep the artifact available to CI; do not commit a lockfile pointing at a personal absolute path. If vendor artifacts are prohibited, agree on an approved package/artifact registry instead; do not silently publish it.
@@ -46,10 +46,10 @@ Follow the code in the [SDK README](../sdks/next/README.md):
 
 1. Create one HMR-safe `ApiLensNextSDK` singleton in `src/lib/apilens.server.ts`, protected by `server-only`.
 2. Use `enabled: process.env.APILENS_ENABLED === 'true'` and the actual approved origin in `allowedAppOrigins`. For a **remote dev deployment** set `reportToAgent: false`, `captureWithoutSession: true` and `control: { enabled: true, token: process.env.APILENS_CONTROL_TOKEN }`. For a **local** run keep the server-only `APILENS_AGENT_TOKEN` instead.
-3. Merge Node-only `installFetch()` bootstrapping into the existing `instrumentation.ts`; preserve other instrumentation. Follow the installed Next version's configuration requirements.
-4. Wrap each relevant exported GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS handler with `apiLens.wrapRoute(existingHandler)`, or a whole route module with `apiLens.wrapRouteModule({ ... })`. **Bootstrapping alone is insufficient.** Preserve request/params types, runtime, streaming, response headers, caching and business logic.
+3. Merge Node-only `apiLens.install()` bootstrapping into the existing `instrumentation.ts`; preserve other instrumentation. Follow the installed Next version's configuration requirements. From 0.3.0 this is **all** the wiring: every page, Server Component, server action and route handler is captured with its backend `fetch` calls. **Do not edit page, layout or route files.** Tune coverage in the singleton's config (`autoInstrument.ignorePaths`) instead.
+4. `wrapRoute`/`traceRender` remain available but are optional; use them only for something automatic capture cannot give (for example route-level mocks with `allowRouteMocks`).
 5. Add `src/app/api/%5F_apilens/[[...segments]]/route.ts` (the `%5F` prefix is required: App Router never routes folders starting with `_`, so `__apilens` would 404; it is still served at `/api/__apilens`) exporting `apiLens.controlRoute()` with `runtime = 'nodejs'` and `dynamic = 'force-dynamic'` when the control plane is used.
-6. Inventory all route files and HTTP exports. The FE team previously counted 32 routes; verify the actual count and explicitly list unwrapped/Edge routes. Do not silently convert Edge routes to Node.
+6. List Edge routes explicitly: automatic capture covers the Node runtime only. Do not silently convert Edge routes to Node.
 
 `src/middleware.ts` is Edge according to the FE review; it is not an SDK mount point. Do not add a custom Express server or import the SDK into React Client Components.
 

@@ -68,25 +68,21 @@ or ask for the artifact. Do not invent package exports or npm publication.
 - Document approved runtime configuration and restart requirements without
   writing tokens into tracked files. Remain disabled by default.
 
-4. Integrate the Node boot hook AND route context
+4. Integrate the Node boot hook (the only wiring)
 - Merge with the existing instrumentation.ts register() function, preserving
   current instrumentation. Under process.env.NEXT_RUNTIME === 'nodejs',
-  dynamically import the singleton and call apiLens.installFetch().
+  dynamically import the singleton and call apiLens.install().
 - Check the installed Next version and enable instrumentation only if its
   documented configuration requires it. Do not blindly add obsolete flags.
 - Do not use Edge src/middleware.ts as the mount point. Do not invent an
   Express custom server or silently change Edge routes to Node runtime.
-- Instrumentation boot alone is insufficient: each relevant HTTP export in
-  app/api/**/route.ts or src/app/api/**/route.ts needs wrapping:
-  export const GET = apiLens.wrapRoute(existingGETHandler);
-  Use the same pattern for POST, PUT, PATCH, DELETE, HEAD and OPTIONS where
-  they actually exist. Preserve request/NextRequest types and the params
-  context signature, including Promise-based params when applicable.
-- Keep route business logic, authentication, cookies, headers, returned
-  Response/NextResponse, body streaming, abort signals and caching unchanged.
-  Existing core-networking/fetch calls must remain unchanged.
-- Inventory every route file and HTTP export, and report wrapped vs excluded
-  handlers. Do not claim all 32 routes are covered without checking exports.
+- With @apilens/next-sdk 0.3.0 the boot hook captures every Node-runtime
+  page, Server Component, server action and route handler, plus the fetch
+  calls each one makes. Do NOT edit page, layout or route files, and do not
+  add wrapRoute/traceRender calls. Adjust coverage only through the
+  singleton's config (autoInstrument.ignorePaths).
+- Existing core-networking/fetch calls must remain unchanged.
+- List Edge-runtime routes and pages explicitly: they are not captured.
 
 5. Verify the integration honestly
 - Run scoped tests, typecheck and scoped lint using the project's conventions.

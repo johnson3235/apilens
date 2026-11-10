@@ -39,6 +39,8 @@ export declare function captureMessageBody(message: Request | Response, config: 
  * as intentionally skipped.
  */
 export declare function captureInitBody(body: BodyInit | null | undefined, contentType: string | null, config: BodyCaptureConfig): Promise<CaptureOutcome>;
+/** Captures bytes already copied off a stream, such as a tapped Node request or response. */
+export declare function captureBytes(bytes: Uint8Array, truncated: boolean, contentType: string | null, config: BodyCaptureConfig): CaptureOutcome;
 /** Waits for a capture without ever delaying the application request. */
 export declare function settleCapture(capture: Promise<CaptureOutcome> | null, timeoutMs: number): Promise<CaptureOutcome>;
 export {};

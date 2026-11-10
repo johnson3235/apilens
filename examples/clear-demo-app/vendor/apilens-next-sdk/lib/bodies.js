@@ -5,6 +5,7 @@ exports.resolveBodyCapture = resolveBodyCapture;
 exports.classifyContentType = classifyContentType;
 exports.captureMessageBody = captureMessageBody;
 exports.captureInitBody = captureInitBody;
+exports.captureBytes = captureBytes;
 exports.settleCapture = settleCapture;
 const redaction_1 = require("./redaction");
 /**
@@ -195,6 +196,18 @@ async function captureInitBody(body, contentType, config) {
     catch (error) {
         return { body: null, omitted: `Body read failed (${error instanceof Error ? error.name : 'unknown'})` };
     }
+}
+/** Captures bytes already copied off a stream, such as a tapped Node request or response. */
+function captureBytes(bytes, truncated, contentType, config) {
+    if (config.maxBytes === 0)
+        return { body: null, omitted: 'Body capture cap is 0 bytes' };
+    if (bytes.byteLength === 0 && !truncated)
+        return NOT_CAPTURED;
+    const classification = classifyContentType(contentType, config);
+    if (classification === 'skip') {
+        return { body: null, omitted: `Not captured: ${contentType ?? 'unknown content type'} is treated as binary` };
+    }
+    return { body: finalise(bytes, truncated, contentType, classification, config), omitted: null };
 }
 /** Waits for a capture without ever delaying the application request. */
 async function settleCapture(capture, timeoutMs) {
