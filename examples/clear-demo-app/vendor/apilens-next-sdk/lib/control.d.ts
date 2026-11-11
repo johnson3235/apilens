@@ -41,6 +41,8 @@ export declare function controlMountPath(value: string | undefined): string;
  */
 export declare function resolveOperation(pathname: string): string;
 export declare function createControlHandler(context: ControlContext): (request: Request) => Promise<Response>;
+/** This process's entry in `cursors=<processId>:<seq>,…`; 0 when the extension has not polled it yet. */
+export declare function cursorFor(cursors: string, processId: string): number;
 export declare function buildRulesRevision(rules: ServerMockRule[]): string;
 export declare function emptyHealth(serviceName: string, processId: string, startedAt: number, sdkVersion: string): ControlHealth;
 //# sourceMappingURL=control.d.ts.map

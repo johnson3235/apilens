@@ -51,6 +51,12 @@ export interface ServerCall {
   responseBodyOmitted: string | null;
   error: string | null;
   mockedBy: string | null;
+  /** `middleware` for an Edge middleware run and its calls (SDK 0.5.0+). */
+  stage?: 'middleware' | null;
+  /** The middleware run that let this page request through (SDK 0.5.0+). */
+  middlewareSpanId?: string | null;
+  /** `hit` when Next answered from its fetch cache and no backend call was made (SDK 0.5.0+). */
+  cache?: 'hit' | null;
 }
 
 export type ServerMockMatchType = 'glob' | 'regex' | 'contains' | 'equals' | 'startsWith';
@@ -127,6 +133,31 @@ export interface ServerControlHealth {
   ruleCount: number;
   activeRuleCount: number;
   agentDelivery: { accepted: number; dropped: number; lastError: string | null };
+  /** What the server's request hook saw and skipped (SDK 0.5.0+). */
+  capture?: ServerCaptureStats;
+}
+
+export interface ServerCaptureStats {
+  installed: boolean;
+  installedBy: 'boot' | 'first-connection' | null;
+  requestsSeen: number;
+  requestsRecorded: number;
+  skipped: { ignoredPath: number; noSession: number; originNotAllowed: number; noBackendCall: number };
+  lastRejectedOrigin: string | null;
+  learnedOrigins: string[];
+  backendCalls: number;
+  cacheHits: number;
+  middlewareRuns: number;
+  lastRequestAt: number | null;
+}
+
+/** One server process (pod) heard from recently. */
+export interface ServerPodStatus {
+  processId: string;
+  serviceName: string | null;
+  lastSeenAt: number;
+  bufferedCalls: number | null;
+  gap: boolean;
 }
 
 /** Everything the UI needs to explain the server link in one glance. */
@@ -142,8 +173,10 @@ export interface ServerBridgeStatus {
   gap: boolean;
   callCount: number;
   ruleCount: number;
-  /** Set when the server process restarted, so the UI can reset its cursor. */
+  /** The process that answered most recently. */
   processId: string | null;
+  /** Every process heard from recently; more than one means a load balancer spreads the polls. */
+  pods?: ServerPodStatus[];
 }
 
 export class ServerControlError extends Error {
@@ -243,8 +276,16 @@ export class ServerControlClient {
     return call<ServerControlHealth>(this.base, this.options.token, 'health');
   }
 
-  calls(since: number, limit = 200): Promise<{ processId: string; latestSeq: number; calls: ServerCall[]; gap: boolean }> {
-    return call(this.base, this.options.token, `calls?since=${Math.max(0, Math.trunc(since))}&limit=${limit}`);
+  /**
+   * `cursors` maps each known process to the last seq read from it: behind a
+   * load balancer any pod may answer, and each reads its own entry (SDK 0.5+).
+   * Older SDKs ignore it and read `since`: the cursor of the pod that answered last.
+   */
+  calls(since: number, limit = 200, cursors?: Map<string, number>): Promise<{ processId: string; latestSeq: number; calls: ServerCall[]; gap: boolean }> {
+    const base = `calls?since=${Math.max(0, Math.trunc(since))}&limit=${limit}`;
+    if (!cursors) return call(this.base, this.options.token, base);
+    const entries = [...cursors].slice(-64).map(([processId, seq]) => `${encodeURIComponent(processId)}:${Math.max(0, Math.trunc(seq))}`);
+    return call(this.base, this.options.token, `${base}&cursors=${entries.join(',')}`);
   }
 
   clearCalls(): Promise<{ cleared: boolean }> {
@@ -267,8 +308,12 @@ export class ServerControlClient {
 /** One row of the route-grouped call list. */
 export interface ServerFlowRow {
   call: ServerCall;
-  /** 0 for an incoming route or an orphan upstream call; 1 for an upstream call under its route. */
-  depth: 0 | 1;
+  /**
+   * 0 for an incoming route or an orphan upstream call; 1 for an upstream call
+   * under its route, or the middleware run that let the route through; 2 for
+   * a call that middleware run made.
+   */
+  depth: 0 | 1 | 2;
   /** Upstream calls listed under this row (routes only). */
   childCount: number;
   /** True for the last upstream call under its route, so the tree connector can close. */
@@ -289,9 +334,21 @@ export function groupCallsByRoute(calls: ServerCall[]): ServerFlowRow[] {
   const routes = new Map<string, ServerCall>();
   for (const call of calls) if (call.kind === 'server') routes.set(call.spanId, call);
 
+  // A middleware run is shown under the page it let through (SDK 0.5+), not as a page of its own.
+  const middlewareOf = new Map<string, ServerCall>();
+  const nested = new Set<string>();
+  for (const call of calls) {
+    const run = call.kind === 'server' && call.middlewareSpanId ? routes.get(call.middlewareSpanId) : undefined;
+    if (run && run.stage === 'middleware' && !nested.has(run.spanId)) {
+      middlewareOf.set(call.spanId, run);
+      nested.add(run.spanId);
+    }
+  }
+
   const children = new Map<string, ServerCall[]>();
   const roots: ServerCall[] = [];
   for (const call of calls) {
+    if (nested.has(call.spanId)) continue;
     const parent = call.parentSpanId ? routes.get(call.parentSpanId) : undefined;
     if (parent && isChildOf(call, parent)) {
       const list = children.get(parent.spanId) ?? [];
@@ -306,21 +363,35 @@ export function groupCallsByRoute(calls: ServerCall[]): ServerFlowRow[] {
   const rows: ServerFlowRow[] = [];
   for (const root of roots.sort(byStart)) {
     const own = (children.get(root.spanId) ?? []).sort(byStart);
-    rows.push({ call: root, depth: 0, childCount: own.length, last: false });
+    const run = middlewareOf.get(root.spanId);
+    const runCalls = run ? (children.get(run.spanId) ?? []).sort(byStart) : [];
+    rows.push({ call: root, depth: 0, childCount: own.length + (run ? 1 + runCalls.length : 0), last: false });
+    if (run) {
+      rows.push({ call: run, depth: 1, childCount: runCalls.length, last: own.length === 0 });
+      runCalls.forEach((child, index) => rows.push({ call: child, depth: 2, childCount: 0, last: index === runCalls.length - 1 }));
+    }
     own.forEach((child, index) => rows.push({ call: child, depth: 1, childCount: 0, last: index === own.length - 1 }));
   }
   return rows;
 }
 
 /** The route that made `call`, and the upstream calls `call` made, from the captured set. */
-export function relatedServerCalls(call: ServerCall, calls: ServerCall[]): { parent: ServerCall | null; children: ServerCall[] } {
+export function relatedServerCalls(
+  call: ServerCall,
+  calls: ServerCall[],
+): { parent: ServerCall | null; children: ServerCall[]; middleware: ServerCall | null } {
   const parent = call.parentSpanId
     ? calls.find((candidate) => candidate.kind === 'server' && isChildOf(call, candidate)) ?? null
-    : null;
+    : call.stage === 'middleware' && call.kind === 'server'
+      ? calls.find((candidate) => candidate.kind === 'server' && candidate.middlewareSpanId === call.spanId) ?? null
+      : null;
   const children = call.kind === 'server'
     ? calls.filter((candidate) => isChildOf(candidate, call)).sort((a, b) => a.startedAt - b.startedAt)
     : [];
-  return { parent, children };
+  const middleware = call.kind === 'server' && call.middlewareSpanId
+    ? calls.find((candidate) => candidate.spanId === call.middlewareSpanId && candidate.stage === 'middleware') ?? null
+    : null;
+  return { parent, children, middleware };
 }
 
 /** Builds a server mock rule pre-filled from a captured call. */

@@ -73,7 +73,7 @@ describe('control plane served by the request hook (no route file)', () => {
 
     expect((await fetch(`${app}/api/__apilens/health`)).status).toBe(401);
     const health = (await (await fetch(`${app}/api/__apilens/health`, { headers: auth })).json()) as ControlHealth;
-    expect(health).toMatchObject({ sdkVersion: '0.4.0', enabled: true, configIssues: [] });
+    expect(health).toMatchObject({ sdkVersion: '0.5.0', enabled: true, configIssues: [] });
     // The App Router folder spelling reaches the same handler.
     expect((await fetch(`${app}/api/%5F_apilens/health`, { headers: auth })).status).toBe(200);
 

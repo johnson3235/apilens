@@ -2,7 +2,7 @@ import type { ConfigIssue, ControlHealth, NextSDKOptions, ServerCall, ServerMock
 export * from './types';
 export { DEFAULT_TEXT_CONTENT_TYPES } from './bodies';
 export { MIN_TOKEN_LENGTH } from './control';
-export declare const SDK_VERSION = "0.4.0";
+export declare const SDK_VERSION = "0.5.0";
 /**
  * Session id used when `captureWithoutSession` is on.
  *
@@ -72,6 +72,11 @@ export declare class ApiLensNextSDK {
     private readonly issues;
     private lateCallsSkipped;
     private ignoredOutgoingCalls;
+    /** Outermost fetch layer, above Next's own patch, that notices cache hits. */
+    private cacheLayer;
+    /** Origins the extension reached the control plane through; requests there are this app's own. */
+    private readonly learnedOrigins;
+    private readonly stats;
     /** Distinguishes a restarted server from an idle one in the extension. */
     readonly processId: string;
     readonly startedAt: number;
@@ -105,6 +110,12 @@ export declare class ApiLensNextSDK {
      * a folder starting with `_` is private in the App Router and never routed).
      */
     handleControlRequest(request: Request): Promise<Response>;
+    /**
+     * The extension reached the control plane through this origin with a valid
+     * token, so pages served there are this application's own, even when the
+     * ingress rewrites the host away from `allowedAppOrigins`.
+     */
+    private learnOrigin;
     /** Ready-made App Router exports for the control route file. */
     controlRoute(): {
         GET: (request: Request) => Promise<Response>;
@@ -125,7 +136,20 @@ export declare class ApiLensNextSDK {
      */
     install(): void;
     /** Same as `install()`; kept for 0.2 integrations, which already call it at boot. */
-    installFetch(): void;
+    installFetch(by?: 'boot' | 'first-connection'): void;
+    /**
+     * Puts a layer above whatever later replaces `globalThis.fetch`.
+     *
+     * Next (and React's request deduplication) patch fetch after boot and answer
+     * cached calls themselves, so the wrapper below them never sees those. The
+     * global becomes an accessor: assignments land underneath this layer, which
+     * calls through them and records a call as a cache hit when it came back
+     * without ever reaching the network wrapper. When the patch calls down to
+     * the fetch it captured (this layer), the call goes straight to `base`.
+     */
+    private installCacheLayer;
+    /** A fetch Next answered from its cache: no backend call happened, but the page got this data. */
+    private recordCacheHit;
     /**
      * True for calls that are passed through untouched: tracer and agent
      * traffic, configured ignores, and background work that only inherited the
