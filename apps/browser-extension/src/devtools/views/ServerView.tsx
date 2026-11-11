@@ -1,23 +1,24 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { VirtualTable, type VirtualTableColumn } from '../components/VirtualTable';
 import { ServerCallDetail } from '../components/ServerCallDetail';
-import { ServerMockEditor, describeRuleTarget } from '../components/ServerMockEditor';
+import { ServerMockEditor } from '../components/ServerMockEditor';
+import { CaptureDiagnosisCard } from '../components/CaptureDiagnosisCard';
+import { Icon } from '../components/Icon';
 import {
-  SERVER_MOCK_PRESETS,
-  describeStatus,
   groupCallsByRoute,
   relatedServerCalls,
   serverCallHost,
+  serverCallKindLabel,
   serverRuleFromCall,
   type ServerCall,
   type ServerFlowRow,
   type ServerMockRule,
 } from '../../shared/server-control';
+import { diagnoseCapture } from '../../shared/server-diagnosis';
 import type { ServerData } from '../hooks/useServerData';
 
-type Mode = 'calls' | 'mocks';
-type KindFilter = 'all' | 'server' | 'client';
-type StatusFilter = 'all' | 'errors' | 'mocked' | 'slow';
+type KindFilter = 'all' | 'pages' | 'backend';
+type Flag = 'failed' | 'slow' | 'mocked' | 'cached';
 
 const SLOW_MS = 1_000;
 
@@ -29,97 +30,45 @@ function relative(timestamp: number | null): string {
   return `${Math.round(seconds / 60)}m ago`;
 }
 
-/** Small payloads must not all read as "1 KB" — size is a debugging signal. */
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+const matchesFlag = (call: ServerCall, flag: Flag): boolean =>
+  flag === 'failed' ? call.status === 'error'
+    : flag === 'slow' ? call.durationMs >= SLOW_MS
+      : flag === 'mocked' ? Boolean(call.mockedBy)
+        : call.cache === 'hit';
+
+function statusClass(call: ServerCall): string {
+  if (call.statusCode === null) return call.error ? 'err' : 'none';
+  if (call.statusCode >= 400) return 'err';
+  if (call.statusCode >= 300) return 'redirect';
+  return 'ok';
 }
 
-function ConnectionBanner({ data, onSettings }: { data: ServerData; onSettings: () => void }): JSX.Element | null {
-  const status = data.status;
-  if (!status?.configured) {
-    return (
-      <div className="banner info">
-        <div>
-          <strong>No instrumented server connected.</strong>
-          <span> Add the control endpoint URL and token to see server-side calls, payloads and responses.</span>
-        </div>
-        <button className="btn sm" onClick={onSettings}>Open settings</button>
-      </div>
-    );
-  }
-  if (data.error) {
-    return (
-      <div className="banner blocked" role="alert">
-        <div>
-          <strong>Server link problem.</strong>
-          <span> {data.error}</span>
-        </div>
-        <button className="btn sm" onClick={onSettings}>Check settings</button>
-      </div>
-    );
-  }
-  if (status.gap) {
-    return (
-      <div className="banner warn">
-        <div>
-          <strong>Older calls were dropped.</strong>
-          <span> The server buffer rolled over between polls. Increase <code>control.bufferSize</code> or poll more often.</span>
-        </div>
-      </div>
-    );
-  }
-  return null;
+function barClass(call: ServerCall, depth: number): string {
+  if (call.status === 'error') return 'err';
+  if (call.mockedBy) return 'mock';
+  if (call.cache === 'hit') return 'cache';
+  if (call.stage === 'middleware') return 'mw';
+  return depth === 0 ? 'root' : 'ok';
 }
 
-function ServerHealthStrip({ data }: { data: ServerData }): JSX.Element | null {
-  const health = data.status?.health;
-  if (!health) return null;
-  const checks: Array<{ label: string; ok: boolean; detail: string }> = [
-    { label: 'Service', ok: health.enabled, detail: health.enabled ? `${health.serviceName} · SDK ${health.sdkVersion}` : 'SDK present but disabled' },
-    { label: 'Request payloads', ok: health.captureRequestBodies, detail: health.captureRequestBodies ? `Captured up to ${Math.round(health.maxBodyBytes / 1024)} KB` : 'captureBodies.request is off' },
-    { label: 'Response payloads', ok: health.captureResponseBodies, detail: health.captureResponseBodies ? `Captured up to ${Math.round(health.maxBodyBytes / 1024)} KB` : 'captureBodies.response is off' },
-    { label: 'Server mocking', ok: health.mockingEnabled, detail: health.mockingEnabled ? `${health.activeRuleCount} active of ${health.ruleCount}` : 'allowMockControl is false' },
-    { label: 'Route mocks', ok: health.routeMocksEnabled, detail: health.routeMocksEnabled ? 'Incoming routes can be short-circuited' : 'Outbound calls only' },
-  ];
-  const passing = checks.filter((check) => check.ok).length;
-  const issues = health.configIssues ?? [];
+/** One line per page: what it took to answer it. */
+function pageSummary(children: ServerCall[]): string {
+  const backend = children.filter((call) => call.kind === 'client' && call.cache !== 'hit' && call.stage !== 'middleware').length;
+  const cached = children.filter((call) => call.cache === 'hit').length;
+  const middleware = children.some((call) => call.stage === 'middleware');
+  const failed = children.filter((call) => call.status === 'error').length;
+  return [
+    backend ? `${backend} backend` : null,
+    middleware ? 'middleware' : null,
+    cached ? `${cached} cached` : null,
+    failed ? `${failed} failed` : null,
+  ].filter(Boolean).join(' · ');
+}
 
-  // Collapsed by default: a DevTools panel is short, and the call list is what
-  // the tester came for. The summary still answers "is capture working?".
-  return <details className="server-health-wrap">
-    <summary>
-      <span className={passing === checks.length ? 'ok-text' : ''}>{passing}/{checks.length} capture features enabled</span>
-      <span className="muted"> · {health.serviceName} · SDK {health.sdkVersion} · synced {relative(data.status?.lastSyncAt ?? null)} · {health.bufferedCalls} buffered</span>
-    </summary>
-    <section className="server-health" aria-label="Server capture readiness">
-      {checks.map((check) => (
-        <div key={check.label} className={check.ok ? 'pass' : 'neutral'}>
-          <span aria-hidden="true">{check.ok ? '✓' : '·'}</span>
-          <div><strong>{check.label}</strong><small>{check.detail}</small></div>
-        </div>
-      ))}
-      {typeof health.bufferedBytes === 'number' && health.maxBufferBytes ? (
-        <div className={health.bufferedBytes > health.maxBufferBytes * 0.8 ? 'neutral' : 'pass'}>
-          <span aria-hidden="true">{health.bufferedBytes > health.maxBufferBytes * 0.8 ? '!' : '✓'}</span>
-          <div><strong>Server memory</strong><small>{formatSize(health.bufferedBytes)} of {formatSize(health.maxBufferBytes)} used by captures</small></div>
-        </div>
-      ) : null}
-      {issues.map((issue) => (
-        <div key={`${issue.setting}:${issue.problem}`} className="neutral">
-          <span aria-hidden="true">!</span>
-          <div><strong>{issue.setting}</strong><small>{issue.problem}</small></div>
-        </div>
-      ))}
-      {health.droppedCalls > 0 ? (
-        <div className="neutral">
-          <span aria-hidden="true">!</span>
-          <div><strong>Dropped</strong><small>{health.droppedCalls} calls evicted from the server buffer</small></div>
-        </div>
-      ) : null}
-    </section>
-  </details>;
+interface Row extends ServerFlowRow {
+  /** The page's time window, for the waterfall. */
+  window: { start: number; end: number };
+  summary: string;
 }
 
 export function ServerView({
@@ -128,6 +77,8 @@ export function ServerView({
   onSettings,
   onCopy,
   onNotice,
+  onOpenBrowserCalls,
+  onOpenMocks,
 }: {
   data: ServerData;
   /** The QA session recording in this tab, whose calls "My session" shows. */
@@ -135,85 +86,119 @@ export function ServerView({
   onSettings: () => void;
   onCopy: (value: string) => void;
   onNotice: (message: string) => void;
+  onOpenBrowserCalls?: () => void;
+  onOpenMocks?: () => void;
 }): JSX.Element {
-  const [mode, setMode] = useState<Mode>('calls');
   // On a shared server, other testers' traffic is noise; default to this tester's own calls while recording.
   const [scope, setScope] = useState<'mine' | 'everyone'>('mine');
+  const [query, setQuery] = useState('');
+  const [kind, setKind] = useState<KindFilter>('all');
+  const [flags, setFlags] = useState<Set<Flag>>(new Set());
+  const [grouped, setGrouped] = useState(true);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<ServerCall | null>(null);
+  const [draft, setDraft] = useState<{ rule: ServerMockRule; sample: string | null } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [showDiagnosis, setShowDiagnosis] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+
   const mineOnly = scope === 'mine' && sessionId !== null;
   const scoped = useMemo(() => (mineOnly ? data.calls.filter((call) => call.sessionId === sessionId) : data.calls), [data.calls, mineOnly, sessionId]);
   const hiddenByScope = data.calls.length - scoped.length;
-  const [query, setQuery] = useState('');
-  const [kind, setKind] = useState<KindFilter>('all');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [grouped, setGrouped] = useState(true);
-  const [selected, setSelected] = useState<ServerCall | null>(null);
-  const [draft, setDraft] = useState<ServerMockRule | null>(null);
-  const [draftSample, setDraftSample] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const diagnosis = useMemo(() => diagnoseCapture(data.status, data.calls.length), [data.status, data.calls.length]);
+
+  // "/" jumps to the filter, Escape closes whatever is open on the right.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      const typing = event.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
+      if (event.key === '/' && !typing) {
+        event.preventDefault();
+        searchRef.current?.focus();
+      } else if (event.key === 'Escape' && !typing) {
+        if (draft) setDraft(null);
+        else setSelected(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [draft]);
+
+  const counts = useMemo(() => {
+    const result: Record<Flag, number> = { failed: 0, slow: 0, mocked: 0, cached: 0 };
+    for (const call of scoped) for (const flag of Object.keys(result) as Flag[]) if (matchesFlag(call, flag)) result[flag] += 1;
+    return result;
+  }, [scoped]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return scoped.filter((call) => {
-      if (kind !== 'all' && call.kind !== kind) return false;
-      if (statusFilter === 'errors' && call.status !== 'error') return false;
-      if (statusFilter === 'mocked' && !call.mockedBy) return false;
-      if (statusFilter === 'slow' && call.durationMs < SLOW_MS) return false;
+    const direct = scoped.filter((call) => {
+      if (kind === 'pages' && call.kind !== 'server') return false;
+      if (kind === 'backend' && call.kind !== 'client') return false;
+      for (const flag of flags) if (!matchesFlag(call, flag)) return false;
       if (!needle) return true;
-      return `${call.method} ${call.url} ${call.statusCode ?? ''} ${call.serviceName} ${call.requestBody?.content ?? ''} ${call.responseBody?.content ?? ''}`
+      return `${call.method} ${call.url} ${call.statusCode ?? ''} ${call.serviceName} ${call.mockedBy ?? ''} ${call.requestBody?.content ?? ''} ${call.responseBody?.content ?? ''}`
         .toLowerCase()
         .includes(needle);
     });
-  }, [scoped, query, kind, statusFilter]);
+    if (!grouped || kind !== 'all' || (flags.size === 0 && !needle)) return direct;
+    // A matching backend call keeps its page (and middleware run) around it, so it is never shown out of context.
+    const keep = new Set(direct.map((call) => call.spanId));
+    const bySpan = new Map(scoped.map((call) => [call.spanId, call]));
+    for (const call of direct) {
+      const parent = call.parentSpanId ? bySpan.get(call.parentSpanId) : undefined;
+      if (parent) keep.add(parent.spanId);
+      if (parent?.stage === 'middleware') {
+        const page = scoped.find((candidate) => candidate.middlewareSpanId === parent.spanId);
+        if (page) keep.add(page.spanId);
+      }
+    }
+    return scoped.filter((call) => keep.has(call.spanId));
+  }, [scoped, query, kind, flags, grouped]);
 
-  // Grouped: each incoming route is followed by the upstream calls it made.
-  const rows = useMemo<ServerFlowRow[]>(
-    () => (grouped ? groupCallsByRoute(filtered) : filtered.map((call) => ({ call, depth: 0, childCount: 0, last: false }))),
-    [filtered, grouped],
-  );
+  const rows = useMemo<Row[]>(() => {
+    const flow: ServerFlowRow[] = grouped ? groupCallsByRoute(filtered) : filtered.map((call) => ({ call, depth: 0, childCount: 0, last: false }));
+    const result: Row[] = [];
+    let index = 0;
+    while (index < flow.length) {
+      const head = flow[index]!;
+      let end = index + 1;
+      while (end < flow.length && flow[end]!.depth > 0) end += 1;
+      const group = flow.slice(index, end);
+      const members = group.map((row) => row.call);
+      const window = {
+        start: Math.min(...members.map((call) => call.startedAt)),
+        end: Math.max(...members.map((call) => call.endedAt), head.call.startedAt + 1),
+      };
+      const summary = group.length > 1 ? pageSummary(members.slice(1)) : '';
+      const hidden = collapsed.has(head.call.spanId);
+      group.forEach((row, offset) => {
+        if (offset > 0 && hidden) return;
+        result.push({ ...row, window, summary: offset === 0 ? summary : '' });
+      });
+      index = end;
+    }
+    return result;
+  }, [filtered, grouped, collapsed]);
+
   const related = useMemo(() => (selected ? relatedServerCalls(selected, data.calls) : null), [selected, data.calls]);
-  const multiService = useMemo(() => new Set(data.calls.map((call) => call.serviceName)).size > 1, [data.calls]);
 
-  const stats = useMemo(() => {
-    const incoming = scoped.filter((call) => call.kind === 'server').length;
-    const outgoing = scoped.length - incoming;
-    const errors = scoped.filter((call) => call.status === 'error').length;
-    const mocked = scoped.filter((call) => call.mockedBy).length;
-    const slowest = scoped.reduce((max, call) => Math.max(max, call.durationMs), 0);
-    return { incoming, outgoing, errors, mocked, slowest };
-  }, [scoped]);
+  function toggleFlag(flag: Flag): void {
+    setFlags((current) => {
+      const next = new Set(current);
+      if (next.has(flag)) next.delete(flag);
+      else next.add(flag);
+      return next;
+    });
+  }
 
-  const columns: Array<VirtualTableColumn<ServerFlowRow>> = [
-    {
-      key: 'kind',
-      header: 'Type',
-      width: '78px',
-      render: ({ call }) => (
-        <span className={`dir ${call.kind}`} title={call.kind === 'server' ? 'The page called this server' : 'This server called a backend service'}>
-          {call.kind === 'server' ? 'PAGE' : 'BACKEND'}
-        </span>
-      ),
-    },
-    { key: 'method', header: 'Method', width: '58px', className: 'mono', render: ({ call }) => <span className={`method ${call.method.toLowerCase()}`}>{call.method}</span> },
-    { key: 'status', header: 'Status', width: '54px', className: 'status', render: ({ call }) => <span className={`status-pill ${call.status}`} title={describeStatus(call)}>{call.statusCode ?? (call.error ? 'ERR' : '—')}</span> },
-    {
-      key: 'path',
-      header: 'Path',
-      width: 'auto',
-      className: 'mono',
-      render: ({ call, depth, childCount, last }) => (
-        <span className={`flow-path depth-${depth}`}>
-          {depth === 1 ? <i className={`tree ${last ? 'last' : ''}`} aria-hidden="true" /> : null}
-          {call.kind === 'client' ? <span className="host" title={call.origin}>{serverCallHost(call)}</span> : null}
-          <span className="path-text">{call.path || call.url}</span>
-          {childCount > 0 ? <span className="flow-count" title="Backend calls this server made to answer the page">{childCount} backend call{childCount === 1 ? '' : 's'}</span> : null}
-        </span>
-      ),
-    },
-    ...(multiService ? [{ key: 'service', header: 'Service', width: '108px', render: ({ call }: ServerFlowRow) => call.serviceName }] : []),
-    { key: 'body', header: 'Size', width: '64px', className: 'num', render: ({ call }) => <span className="muted">{call.responseBody ? formatSize(call.responseBody.byteLength) : call.requestBody ? 'req only' : '—'}</span> },
-    { key: 'mock', header: '', width: '62px', render: ({ call }) => (call.mockedBy ? <span className="badge mock" title={call.mockedBy}>mock</span> : null) },
-    { key: 'duration', header: 'Time', width: '64px', className: 'num', render: ({ call }) => <span className={call.durationMs >= SLOW_MS ? 'warn-text' : ''}>{Math.round(call.durationMs)} ms</span> },
-  ];
+  function toggleCollapsed(spanId: string): void {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(spanId)) next.delete(spanId);
+      else next.add(spanId);
+      return next;
+    });
+  }
 
   async function persist(rules: ServerMockRule[], message: string): Promise<void> {
     setSaving(true);
@@ -228,255 +213,218 @@ export function ServerView({
     }
   }
 
-  function startMockFromCall(call: ServerCall): void {
-    setDraft(serverRuleFromCall(call));
-    setDraftSample(call.responseBody?.encoding === 'utf8' ? call.responseBody.content : null);
-    setMode('mocks');
-  }
+  const copyFix = (value: string): void => {
+    onCopy(value);
+    onNotice('Copied — send it to the app’s developer.');
+  };
 
-  const activeRules = data.rules.filter((rule) => rule.enabled);
+  // With the detail open the list is narrow: the path matters more than the summary and the waterfall.
+  const compact = Boolean(selected || draft);
+  const columns: Array<VirtualTableColumn<Row>> = [
+    {
+      key: 'path',
+      header: 'Call',
+      width: 'auto',
+      render: ({ call, depth, childCount }) => {
+        const label = serverCallKindLabel(call);
+        return (
+          <span className="tree-path">
+            {depth === 0 && childCount > 0 ? (
+              <button
+                type="button"
+                className="twisty"
+                aria-expanded={!collapsed.has(call.spanId)}
+                aria-label={collapsed.has(call.spanId) ? 'Show the calls under this page' : 'Hide the calls under this page'}
+                onClick={(event) => { event.stopPropagation(); toggleCollapsed(call.spanId); }}
+              ><Icon name="chevron" size={12} /></button>
+            ) : depth === 0 ? <span className="twisty" aria-hidden="true" /> : <span className={`indent d${depth}`} aria-hidden="true" />}
+            <span className={`tag kind-${label.toLowerCase()}`}>{label}</span>
+            <span className={`method-label ${call.method.toLowerCase()}`}>{call.method}</span>
+            {call.kind === 'client' ? <span className="host" title={call.origin}>{serverCallHost(call)}</span> : null}
+            <span className="path-main" title={call.url}>{call.path || call.url}</span>
+            {call.mockedBy ? <span className="tag mock" title={`Answered by your mock “${call.mockedBy}”`}>mock</span> : null}
+          </span>
+        );
+      },
+    },
+    ...(compact ? [] : [{
+      key: 'summary',
+      header: '',
+      width: '200px',
+      className: 'col-summary',
+      render: (row: Row) => (row.depth === 0 && row.summary ? <span className="tree-path"><span className="summary" title={row.summary}>{row.summary}</span></span> : null),
+    }]),
+    { key: 'status', header: 'Status', width: '64px', render: ({ call }) => <span className={`status-code ${statusClass(call)}`} title={call.error ?? undefined}>{call.statusCode ?? (call.error ? 'ERR' : '—')}</span> },
+    ...(compact ? [] : [{
+      key: 'timeline',
+      header: 'Timeline',
+      width: '140px',
+      render: ({ call, depth, window }: Row) => {
+        const span = Math.max(1, window.end - window.start);
+        const left = Math.min(98, ((call.startedAt - window.start) / span) * 100);
+        const width = Math.min(100 - left, Math.max(1.5, ((call.endedAt - call.startedAt) / span) * 100));
+        return (
+          <span className="wf" title={`Started ${Math.round(call.startedAt - window.start)} ms into the page · took ${Math.round(call.durationMs)} ms`}>
+            <i className={barClass(call, depth)} style={{ left: `${left}%`, width: `${width}%` }} />
+          </span>
+        );
+      },
+    }]),
+    { key: 'duration', header: 'Time', width: '72px', className: 'num', render: ({ call }) => <span className={`dur ${call.durationMs >= SLOW_MS ? 'slow' : ''}`}>{Math.round(call.durationMs)} ms</span> },
+  ];
 
-  const editing = draft;
-  const mockingBlocked = data.status?.health && !data.status.health.mockingEnabled;
+  const status = data.status;
+  const connected = Boolean(status?.connected);
+  const pods = status?.pods?.length ?? 0;
+  const empty = data.calls.length === 0;
+  const problem = diagnosis && (diagnosis.tone === 'fail' || diagnosis.tone === 'warn') ? diagnosis : null;
 
   return (
-    <div className="content server-view">
-      <div className="view-header">
-        <div>
-          <span className="overline">SERVER-SIDE VISIBILITY</span>
-          <h1>Server API calls</h1>
-          <p>What the app’s server asks its backend services while you use a page, what they answer, and a safe way to make them fail on purpose.</p>
-        </div>
-        <div className="view-actions">
-          <span className={`link-pill ${data.status?.connected ? 'on' : data.status?.configured ? 'warn' : ''}`}>
-            <i aria-hidden="true" />
-            {data.status?.connected ? `Connected · ${data.status.health?.serviceName ?? 'server'}` : data.status?.configured ? 'Reconnecting…' : 'Not connected'}
+    <div className="page server-view">
+      <div className="page-head">
+        <h1>Server calls</h1>
+        {connected ? (
+          <span className="chip ok" title={`Last poll ${relative(status?.lastSyncAt ?? null)}`}>
+            <span className="dot" />Live · {status?.health?.serviceName}{pods > 1 ? ` · ${pods} pods` : ''}
           </span>
-          <button className="btn" onClick={() => void data.refresh()} disabled={data.syncing}>{data.syncing ? 'Syncing…' : 'Refresh'}</button>
-          <button className="btn danger" onClick={() => void data.clear()}>Clear</button>
+        ) : status?.configured ? (
+          <span className="chip err"><span className="dot" />Not reachable</span>
+        ) : null}
+        {problem && !empty ? (
+          <button className="chip warn" onClick={() => setShowDiagnosis((open) => !open)} aria-expanded={showDiagnosis}>
+            <Icon name="alert" size={12} />{problem.headline}
+          </button>
+        ) : null}
+        <div className="actions">
+          {sessionId !== null ? (
+            <div className="seg" role="group" aria-label="Whose calls">
+              <button aria-pressed={scope === 'mine'} onClick={() => setScope('mine')} title="Calls tagged with the QA session recording in this tab">My session</button>
+              <button aria-pressed={scope === 'everyone'} onClick={() => setScope('everyone')} title="Every tester and user on this server">Everyone</button>
+            </div>
+          ) : null}
+          <button className="icon-btn" onClick={() => void data.refresh()} disabled={data.syncing} aria-label="Refresh now" title="Refresh now"><Icon name="refresh" /></button>
+          <button className="btn danger sm" onClick={() => { void data.clear(); setSelected(null); }} disabled={empty}>Clear</button>
         </div>
       </div>
 
-      <ConnectionBanner data={data} onSettings={onSettings} />
-
-      <div className="segmented" role="tablist" aria-label="Server workspace">
-        <button role="tab" aria-selected={mode === 'calls'} className={mode === 'calls' ? 'active' : ''} onClick={() => setMode('calls')}>
-          Calls <b>{scoped.length}</b>
-        </button>
-        <button role="tab" aria-selected={mode === 'mocks'} className={mode === 'mocks' ? 'active' : ''} onClick={() => setMode('mocks')}>
-          Server mocks <b>{data.rules.length}</b>
-        </button>
-      </div>
-
-      {mode === 'calls' ? (
+      {!status?.configured ? (
+        <div className="empty2">
+          <span className="glyph"><Icon name="server" size={22} /></span>
+          <h2>See what the app’s server does behind the page</h2>
+          <p>Link the app once with its address and the access token from your team lead. Every backend call the server makes while you test then shows up here, with what was sent and what came back.</p>
+          <div className="row"><button className="btn primary" onClick={onSettings}>Link a server</button></div>
+          <div className="steps-inline"><span><b>1</b>Link the server</span><span><b>2</b>Use the page</span><span><b>3</b>Click a call to inspect or break it</span></div>
+        </div>
+      ) : (
         <>
-          <ServerHealthStrip data={data} />
-
-          <ol className="qa-steps" aria-label="How to test server calls">
-            <li><b>1</b><span><strong>Use the page</strong> in the app, for example open the billing page.</span></li>
-            <li><b>2</b><span><strong>Click a call</strong> to see what was sent and what came back.</span></li>
-            <li><b>3</b><span><strong>Simulate a problem</strong> on a backend call, repeat the step, and check the page copes.</span></li>
-          </ol>
-
-          <div className="metric-row">
-            <div><span>Page calls</span><strong>{stats.incoming}</strong></div>
-            <div><span>Backend calls</span><strong>{stats.outgoing}</strong></div>
-            <div><span>Failures</span><strong className={stats.errors ? 'error-text' : ''}>{stats.errors}</strong></div>
-            <div><span>Mocked</span><strong className="mock-text">{stats.mocked}</strong></div>
-            <div><span>Slowest</span><strong>{Math.round(stats.slowest)} ms</strong></div>
-          </div>
-
-          <div className="filter-bar">
-            <label className="search-field grow">
-              <span className="sr-only">Filter server calls</span>
-              <input className="input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter by path, status, service or payload text…" />
-            </label>
-            {sessionId !== null ? (
-              <div className="segmented sm" role="group" aria-label="Whose calls">
-                <button className={scope === 'mine' ? 'active' : ''} onClick={() => setScope('mine')} title="Calls tagged with the QA session recording in this tab">My session</button>
-                <button className={scope === 'everyone' ? 'active' : ''} onClick={() => setScope('everyone')} title="Every tester and user on this server">Everyone</button>
-              </div>
-            ) : null}
-            <div className="segmented sm" role="group" aria-label="Direction filter">
-              {(['all', 'server', 'client'] as KindFilter[]).map((value) => (
-                <button key={value} className={kind === value ? 'active' : ''} onClick={() => setKind(value)}>
-                  {value === 'all' ? 'All' : value === 'server' ? 'Page calls' : 'Backend calls'}
-                </button>
-              ))}
+          {data.error ? (
+            <div className="notice err" role="alert">
+              <Icon name="alert" />
+              <div><strong>Can’t reach the server.</strong><span> {data.error}</span></div>
+              <button className="btn sm" onClick={onSettings}>Check the link</button>
             </div>
-            <label className="toggle-inline" title="Show each page call with the backend calls it caused">
-              <input type="checkbox" checked={grouped} onChange={(event) => setGrouped(event.target.checked)} />
-              Group by page call
-            </label>
-            <div className="segmented sm" role="group" aria-label="Status filter">
-              {(['all', 'errors', 'mocked', 'slow'] as StatusFilter[]).map((value) => (
-                <button key={value} className={statusFilter === value ? 'active' : ''} onClick={() => setStatusFilter(value)}>
-                  {value === 'all' ? 'Any result' : value === 'slow' ? 'Slow' : value === 'errors' ? 'Failed' : 'Mocked'}
-                </button>
-              ))}
-            </div>
-          </div>
+          ) : null}
 
           {mineOnly && scoped.length === 0 && hiddenByScope > 0 ? (
-            <div className="banner info" role="status">
+            <div className="notice info" role="status">
+              <Icon name="info" />
               <div>
-                <strong>None of the {hiddenByScope} server calls are tagged with your session yet.</strong>
-                <span> Reload the page so its requests carry your session, check “Tag my traffic with my QA session” in Settings, or switch to Everyone.</span>
+                <strong>None of the {hiddenByScope} server calls carry your session yet.</strong>
+                <span> Reload the page so its requests are tagged (Settings → “Tag my traffic”), or look at everyone’s calls.</span>
               </div>
+              <button className="btn sm" onClick={() => setScope('everyone')}>Show everyone</button>
             </div>
           ) : null}
 
-          <div className="split request-area">
-            <div className="left">
-              <VirtualTable
-                items={rows}
-                columns={columns}
-                selectedId={selected?.spanId}
-                onSelect={(row) => setSelected(row.call)}
-                getId={(row) => row.call.spanId}
-                getRowClass={({ call, depth }) => `${call.status === 'error' ? 'failed' : ''} ${call.mockedBy ? 'mocked' : ''} ${depth ? 'child' : call.kind === 'server' ? 'route' : ''}`}
-                emptyTitle={data.status?.connected ? 'No server calls captured yet' : 'Waiting for a server connection'}
-                emptyHint={
-                  data.status?.connected
-                    ? 'Use the page in the app. Its server calls appear here within a couple of seconds.'
-                    : 'Open Settings → Instrumented server, paste the app address and the access token from your team lead, then use the application.'
-                }
-              />
+          {empty && connected && !data.error && diagnosis ? (
+            <div className="page-scroll" style={{ padding: 0 }}>
+              <CaptureDiagnosisCard diagnosis={diagnosis} onCopy={copyFix} onRefresh={() => void data.refresh()} onOpenBrowserCalls={onOpenBrowserCalls} />
             </div>
-            {selected ? (
-              <ServerCallDetail
-                call={selected}
-                related={related}
-                onSelectRelated={setSelected}
-                onClose={() => setSelected(null)}
-                onMock={startMockFromCall}
-                onCopy={(value) => {
-                  onCopy(value);
-                  onNotice('Copied to clipboard.');
-                }}
-              />
-            ) : null}
-          </div>
-        </>
-      ) : (
-        <div className="scroll view-page">
-          {mockingBlocked ? (
-            <div className="banner blocked">Server mock control is disabled for this deployment (<code>allowMockControl: false</code>).</div>
-          ) : null}
-
-          {editing ? (
-            <ServerMockEditor
-              rule={editing}
-              saving={saving}
-              sampleBody={draftSample}
-              onChange={setDraft}
-              onCancel={() => setDraft(null)}
-              onSave={(enable) => {
-                const others = data.rules.filter((rule) => rule.id !== editing.id);
-                const saved = { ...editing, enabled: enable, updatedAt: Date.now() };
-                void persist(
-                  [...others, saved],
-                  enable ? `“${saved.name}” is on. Repeat the step in the app now.` : `“${saved.name}” saved and kept off.`,
-                );
-              }}
-              onDelete={
-                data.rules.some((rule) => rule.id === editing.id)
-                  ? () => void persist(data.rules.filter((rule) => rule.id !== editing.id), `“${editing.name}” removed.`)
-                  : undefined
-              }
-            />
           ) : (
             <>
-              <div className="row spread">
-                <p className="muted">
-                  A server mock makes a backend service answer the way you choose, so you can check how the page handles problems. It runs on the shared server: turn it off when you finish.
-                </p>
-                <div className="row">
-                  {activeRules.length ? (
-                    <button
-                      className="btn danger"
-                      disabled={saving}
-                      onClick={() => void persist(data.rules.map((rule) => ({ ...rule, enabled: false, updatedAt: Date.now() })), 'All server mocks are off.')}
-                    >
-                      Turn all off ({activeRules.length})
+              {showDiagnosis && diagnosis ? (
+                <CaptureDiagnosisCard diagnosis={diagnosis} onCopy={copyFix} onClose={() => setShowDiagnosis(false)} onOpenBrowserCalls={onOpenBrowserCalls} />
+              ) : null}
+
+              <div className="toolbar">
+                <label className="search grow">
+                  <Icon name="search" size={14} />
+                  <span className="sr-only">Filter server calls</span>
+                  <input ref={searchRef} className="input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter by path, status, service or payload text" />
+                </label>
+                <div className="seg" role="group" aria-label="Which calls">
+                  {(['all', 'pages', 'backend'] as KindFilter[]).map((value) => (
+                    <button key={value} aria-pressed={kind === value} onClick={() => setKind(value)}>
+                      {value === 'all' ? 'All' : value === 'pages' ? 'Pages' : 'Backend'}
                     </button>
-                  ) : null}
-                  <button className="btn" onClick={() => setDraft(blankRule(data.status?.health?.serviceName ?? 'server'))}>
-                    New mock (advanced)
-                  </button>
+                  ))}
+                </div>
+                <span className="sep" aria-hidden="true" />
+                <button className="fchip err" aria-pressed={flags.has('failed')} onClick={() => toggleFlag('failed')} disabled={!counts.failed && !flags.has('failed')}>Failed <b>{counts.failed}</b></button>
+                <button className="fchip" aria-pressed={flags.has('slow')} onClick={() => toggleFlag('slow')} disabled={!counts.slow && !flags.has('slow')} title={`Took ${SLOW_MS / 1000} s or more`}>Slow <b>{counts.slow}</b></button>
+                <button className="fchip mock" aria-pressed={flags.has('mocked')} onClick={() => toggleFlag('mocked')} disabled={!counts.mocked && !flags.has('mocked')}>Mocked <b>{counts.mocked}</b></button>
+                <button className="fchip cache" aria-pressed={flags.has('cached')} onClick={() => toggleFlag('cached')} disabled={!counts.cached && !flags.has('cached')} title="Answered by Next’s cache: no backend call happened">Cached <b>{counts.cached}</b></button>
+                <span className="sep" aria-hidden="true" />
+                <div className="seg" role="group" aria-label="Layout">
+                  <button aria-pressed={grouped} onClick={() => setGrouped(true)} title="Each page with the calls it caused">By page</button>
+                  <button aria-pressed={!grouped} onClick={() => setGrouped(false)} title="Every call in time order">Flat</button>
                 </div>
               </div>
 
-              <div className="rule-list">
-                {data.rules.length === 0 ? (
-                  <div className="empty-state">
-                    <span aria-hidden="true">◎</span>
-                    <h2>No server mocks yet</h2>
-                    <p>Open the Calls tab, click a backend call, then choose “Simulate a problem”. Starting from a real call keeps the mock narrow and safe.</p>
-                    <button className="btn primary" onClick={() => setMode('calls')}>Browse captured calls</button>
-                  </div>
-                ) : (
-                  data.rules.map((rule) => (
-                    <article className={`rule-card ${rule.enabled ? '' : 'off'}`} key={rule.id}>
-                      <button
-                        className={`switch ${rule.enabled ? 'on' : ''}`}
-                        role="switch"
-                        aria-checked={rule.enabled}
-                        aria-label={`${rule.enabled ? 'Disable' : 'Enable'} ${rule.name}`}
-                        disabled={saving}
-                        onClick={() =>
+              <div className="page-body request-area">
+                <div className="list calls">
+                  <VirtualTable
+                    items={rows}
+                    columns={columns}
+                    rowHeight={30}
+                    selectedId={draft ? null : selected?.spanId}
+                    onSelect={(row) => { setDraft(null); setSelected(row.call); }}
+                    getId={(row) => row.call.spanId}
+                    getRowClass={({ call, depth }) => `${depth ? 'child' : 'root'} ${call.status === 'error' ? 'failed' : ''} ${call.mockedBy ? 'mocked' : ''}`}
+                    emptyTitle={connected ? 'No calls match' : 'Waiting for the server'}
+                    emptyHint={connected ? 'Clear the search or the filters to see every call.' : 'Polling the control endpoint…'}
+                  />
+                </div>
+                {draft ? (
+                  <aside className="drawer" aria-label="Simulate a problem">
+                    <div className="drawer-bar">
+                      <button className="btn ghost sm" onClick={() => setDraft(null)}>← Back to the call</button>
+                      <button className="icon-btn" onClick={() => { setDraft(null); setSelected(null); }} aria-label="Close"><Icon name="close" /></button>
+                    </div>
+                    <div className="drawer-body">
+                      <ServerMockEditor
+                        rule={draft.rule}
+                        saving={saving}
+                        sampleBody={draft.sample}
+                        onChange={(rule) => setDraft({ ...draft, rule })}
+                        onCancel={() => setDraft(null)}
+                        onSave={(enable) => {
+                          const saved = { ...draft.rule, enabled: enable, updatedAt: Date.now() };
                           void persist(
-                            data.rules.map((item) => (item.id === rule.id ? { ...item, enabled: !item.enabled, updatedAt: Date.now() } : item)),
-                            `${rule.name} ${rule.enabled ? 'disabled' : 'enabled'}.`,
-                          )
-                        }
-                      >
-                        <span />
-                      </button>
-                      <div className="rule-main">
-                        <div>
-                          <strong>{rule.name}</strong>
-                          <span className={`badge ${rule.enabled ? 'mock' : ''}`}>{rule.enabled ? 'On' : 'Off'}</span>
-                          <span className="badge">{rule.applyMode === 'once' ? 'next call only' : rule.applyMode === 'always' ? 'every call' : rule.applyMode}</span>
-                        </div>
-                        <p>{ruleSentence(rule)}</p>
-                        <code>{rule.match.urlPattern}</code>
-                      </div>
-                      <div className="rule-count">Used<strong>{rule.appliedCount}</strong></div>
-                      <button className="btn sm" onClick={() => setDraft(rule)}>Edit</button>
-                    </article>
-                  ))
-                )}
+                            [...data.rules.filter((rule) => rule.id !== saved.id), saved],
+                            enable ? `“${saved.name}” is on. Repeat the step in the app now.` : `“${saved.name}” saved and kept off.`,
+                          );
+                        }}
+                      />
+                    </div>
+                  </aside>
+                ) : selected ? (
+                  <ServerCallDetail
+                    call={selected}
+                    related={related}
+                    onSelectRelated={setSelected}
+                    onClose={() => setSelected(null)}
+                    onMock={(call) => setDraft({ rule: serverRuleFromCall(call), sample: call.responseBody?.encoding === 'utf8' ? call.responseBody.content : null })}
+                    mockingEnabled={status?.health?.mockingEnabled !== false}
+                    onOpenMocks={onOpenMocks}
+                    onCopy={(value) => { onCopy(value); onNotice('Copied to clipboard.'); }}
+                  />
+                ) : null}
               </div>
             </>
           )}
-        </div>
+        </>
       )}
     </div>
   );
-}
-
-/** "When the server makes the backend call GET /billing, it gets: Service is down." */
-function ruleSentence(rule: ServerMockRule): string {
-  const preset = SERVER_MOCK_PRESETS.find((candidate) => JSON.stringify(candidate.apply(rule).action) === JSON.stringify(rule.action));
-  const outcome = preset ? preset.title : rule.action.type === 'custom-body' ? 'your own answer' : rule.action.type;
-  const spent = rule.applyMode === 'once' && rule.appliedCount >= 1 ? ' Already used once — it will not fire again.' : '';
-  return `When the server makes ${describeRuleTarget(rule)}, it gets: ${outcome}.${spent}`;
-}
-
-function blankRule(serviceName: string): ServerMockRule {
-  const now = Date.now();
-  return {
-    id: `srv-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    name: 'New server rule',
-    description: `Manually created for ${serviceName}.`,
-    enabled: false,
-    priority: 100,
-    match: { method: 'ANY', urlPattern: '', matchType: 'glob', kind: 'client' },
-    action: { type: 'status-code', statusCode: 503, body: JSON.stringify({ error: 'Service unavailable', simulated: true }, null, 2) },
-    applyMode: 'always',
-    appliedCount: 0,
-    createdAt: now,
-    updatedAt: now,
-  };
 }

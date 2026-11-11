@@ -6,7 +6,7 @@ Run `pnpm --filter @apilens/browser-extension check`, then reload the unpacked e
 
 ## Mock Engine
 
-Open a normal HTTP(S) tab, reload once, keep it selected, and choose **QA Mocks → Repair & test**. Engine Doctor separates page support, environment policy, hooks, rule synchronization and self-test. Internal/store pages cannot be injected.
+Open a normal HTTP(S) tab, reload once, keep it selected, and choose **Mocks → Repair & test**. Engine Doctor separates page support, environment policy, hooks, rule synchronization and self-test. Internal/store pages cannot be injected.
 
 ## Missing server trace
 

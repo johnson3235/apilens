@@ -69,7 +69,7 @@ function render(requests: CapturedRequest[], overrides: Partial<Parameters<typeo
 describe('NetworkView', () => {
   it('shows captured calls with endpoint, host and originating page', () => {
     const html = render([make()]);
-    expect(html).toContain('Network calls');
+    expect(html).toContain('Browser calls');
     expect(html).toContain('/v2/billing');
     expect(html).toContain('api.example.com');
     expect(html).toContain('/myaccount/billing');
@@ -99,7 +99,7 @@ describe('NetworkView', () => {
   it('guides the tester when nothing has been captured at all', () => {
     const html = render([]);
     expect(html).toContain('No calls captured yet');
-    expect(html).toContain('Start QA session');
+    expect(html).toContain('Record session');
   });
 
   it('says it is waiting once a session is recording', () => {
@@ -146,7 +146,7 @@ describe('QuerySearch', () => {
 describe('GuidedTour', () => {
   it('covers every workspace section', () => {
     const text = TOUR_SLIDES.map((slide) => `${slide.title} ${slide.what.join(' ')} ${slide.how.join(' ')}`).join(' ').toLowerCase();
-    for (const topic of ['network', 'server api', 'trace', 'mock', 'evidence', 'session', 'keyboard']) {
+    for (const topic of ['browser calls', 'server calls', 'trace', 'mock', 'evidence', 'session', 'keyboard']) {
       expect(text).toContain(topic);
     }
   });

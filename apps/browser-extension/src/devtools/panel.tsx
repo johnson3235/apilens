@@ -10,19 +10,50 @@ import { GuidedTour, TOUR_SLIDES, hasSeenTour, type TourTarget } from './compone
 import { ServerView } from './views/ServerView';
 import { NetworkView } from './views/NetworkView';
 import { useServerData } from './hooks/useServerData';
+import { Icon, type IconName } from './components/Icon';
+import { MocksView } from './views/MocksView';
 
 type View = TourTarget;
-const views: Array<{ id: View; label: string; hint: string }> = [
-  { id: 'guide', label: 'Start here', hint: 'Guided QA workflow' },
-  { id: 'setup', label: 'Integration setup', hint: 'React & server SDK' },
-  { id: 'network', label: 'Network', hint: 'Browser calls, filters & mocks' },
-  { id: 'server', label: 'Server API', hint: 'Payloads & server mocks' },
-  { id: 'traces', label: 'Traces', hint: 'End-to-end journeys' },
-  { id: 'mocks', label: 'QA Mocks', hint: 'Failure simulation' },
-  { id: 'evidence', label: 'Evidence', hint: 'Export proof' },
-  { id: 'academy', label: 'Feature academy', hint: 'All tools & how-to' },
-  { id: 'settings', label: 'Settings', hint: 'Safety and capture' },
+/**
+ * Grouped by what a tester is doing: testing, then setting up. The guide and
+ * the how-to library live behind the help menu instead of taking rail space.
+ */
+const NAV: Array<{ group: string; items: Array<{ id: View; label: string; hint: string; icon: IconName }> }> = [
+  {
+    group: 'Test',
+    items: [
+      { id: 'server', label: 'Server calls', hint: 'What the app’s server asked its backends', icon: 'server' },
+      { id: 'network', label: 'Browser calls', hint: 'Every request the page made', icon: 'globe' },
+      { id: 'mocks', label: 'Mocks', hint: 'Every simulated problem, browser and server', icon: 'flask' },
+      { id: 'evidence', label: 'Evidence', hint: 'Export proof for the defect or sign-off', icon: 'file' },
+      { id: 'traces', label: 'Traces', hint: 'Browser and server spans joined end to end', icon: 'route' },
+    ],
+  },
+  {
+    group: 'Set up',
+    items: [
+      { id: 'setup', label: 'Connect an app', hint: 'Browser needs nothing; server needs the SDK', icon: 'plug' },
+      { id: 'settings', label: 'Settings', hint: 'Server link, capture, privacy', icon: 'gear' },
+    ],
+  },
 ];
+
+function elapsed(since: number, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - since) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+/** Ticks once a second while recording, so the button shows how long the session has run. */
+function useClock(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
+}
 
 /** Opens the tour on the slide that explains the section you are looking at. */
 const SLIDE_FOR_VIEW: Partial<Record<View, string>> = {
@@ -39,7 +70,23 @@ const SLIDE_FOR_VIEW: Partial<Record<View, string>> = {
 function Panel(): JSX.Element {
   const data = usePanelData();
   const server = useServerData(data.state?.settings.serverControl);
-  const [view, setView] = useState<View>(() => localStorage.getItem('apilens.onboarded') ? 'network' : 'guide');
+  const [view, setView] = useState<View>(() => {
+    if (!localStorage.getItem('apilens.onboarded')) return 'guide';
+    return (localStorage.getItem('apilens.view') as View | null) ?? 'network';
+  });
+  const [helpOpen, setHelpOpen] = useState(false);
+  const now = useClock(Boolean(data.state?.recording));
+
+  useEffect(() => {
+    try { localStorage.setItem('apilens.view', view); } catch { /* per-viewer convenience only */ }
+  }, [view]);
+
+  useEffect(() => {
+    if (!helpOpen) return;
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setHelpOpen(false); };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [helpOpen]);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tourAt, setTourAt] = useState<number | null>(() => (hasSeenTour() ? null : 0));
@@ -141,20 +188,56 @@ function Panel(): JSX.Element {
     }, 'Bookmarked. It will be highlighted in the evidence pack.');
   }
 
-  return <main className="app qa-shell">
+  const activeBrowserMocks = data.state?.rules.filter((rule) => rule.enabled).length ?? 0;
+  const activeServerMocks = server.rules.filter((rule) => rule.enabled).length;
+  const activeMocks = activeBrowserMocks + activeServerMocks;
+  const pods = server.status?.pods?.length ?? 0;
+  const counts: Partial<Record<View, number>> = { network: data.requests.length, server: server.calls.length, mocks: activeMocks };
+
+  return <main className="app app2 qa-shell">
     <a className="skip-link" href="#main-content">Skip to workspace</a>
-    <header className="product-header">
-      <div className="product-identity"><span className="brand-mark" aria-hidden="true">A</span><div><strong>ApiLens</strong><span>VOIS IE · Quality Engineering</span></div></div>
-      <div className="header-status" aria-live="polite"><span className={`health-dot ${data.state?.engine?.ready ? 'ready' : ''}`} aria-hidden="true" /><span>{data.state?.engine?.ready ? 'Engine ready' : 'Engine needs attention'}</span><span className={`health-dot ${server.status?.connected ? 'server' : ''}`} aria-hidden="true" /><button type="button" className="status-link" onClick={() => setView('server')}>{server.status?.connected ? `Server: ${server.status.health?.serviceName ?? 'connected'}` : server.status?.configured ? 'Server: reconnecting' : 'Server: not connected'}</button><span className="environment-chip">{data.state?.environmentName ?? 'Local environment'}</span></div>
-      <div className="header-actions">
-        <button className={`record-button ${data.state?.recording ? 'recording' : ''}`} onClick={() => void toggleRecording()} disabled={busy === 'record'} aria-pressed={data.state?.recording}><span className="record-dot" aria-hidden="true" />{data.state?.recording ? 'Stop recording' : 'Start QA session'}</button>
-        <button className="btn help-button" onClick={() => openTour()} aria-label="How it works — guided walkthrough" title="Guided walkthrough of every section"><span aria-hidden="true">?</span><em>How it works</em></button>
+    <header className="topbar">
+      <div className="brand"><span className="brand-mark" aria-hidden="true">A</span><strong>ApiLens</strong><span className="env" title="Environment this page belongs to">{data.state?.environmentName ?? 'Unclassified environment'}</span></div>
+      <div className="topbar-status" aria-live="polite">
+        <button type="button" className={`chip ${data.state?.engine?.ready ? 'ok' : 'warn'}`} onClick={() => setView('mocks')} title={data.state?.engine?.ready ? 'Page hooks are connected: browser calls and browser mocks work' : 'Page hooks are missing: reload the page, then Repair & test under Mocks'}>
+          <span className="dot" />Browser{data.state?.engine?.ready ? '' : ' · needs repair'}
+        </button>
+        <button type="button" className={`chip ${server.status?.connected ? 'ok' : server.status?.configured ? 'err' : ''}`} onClick={() => setView(server.status?.configured ? 'server' : 'settings')} title={server.status?.endpoint ?? 'No instrumented server linked'}>
+          <span className="dot" />{server.status?.connected ? <>Server <span className="muted">· {server.status.health?.serviceName ?? 'connected'}{pods > 1 ? ` · ${pods} pods` : ''}</span></> : server.status?.configured ? 'Server · unreachable' : 'Server · not linked'}
+        </button>
+        {activeMocks ? <button type="button" className="chip mock" onClick={() => setView('mocks')} title="Simulated problems are on. Turn them off when you finish."><span className="dot" />{activeMocks} mock{activeMocks === 1 ? '' : 's'} on</button> : null}
       </div>
+      <div className="topbar-actions">
+        <button className={`rec-btn ${data.state?.recording ? 'recording' : ''}`} onClick={() => void toggleRecording()} disabled={busy === 'record'} aria-pressed={Boolean(data.state?.recording)} title={data.state?.recording ? 'Stop the QA session' : 'Record a named QA session: calls are kept for evidence and tagged so a shared server keeps them apart'}>
+          <span className="rec-dot" aria-hidden="true" />{data.state?.recording ? <>Stop <span className="timer">{elapsed(data.state.session?.startedAt ?? now, now)}</span></> : 'Record session'}
+        </button>
+        <button className="icon-btn help-button" onClick={() => setHelpOpen((open) => !open)} aria-expanded={helpOpen} aria-haspopup="menu" aria-label="Help" title="Help"><Icon name="help" /></button>
+      </div>
+      {helpOpen ? <div className="menu" role="menu" onMouseLeave={() => setHelpOpen(false)}>
+        <button role="menuitem" onClick={() => { setHelpOpen(false); openTour(view); }}><Icon name="info" /><span>Explain this screen</span><small>A short walkthrough of what you are looking at</small></button>
+        <button role="menuitem" onClick={() => { setHelpOpen(false); openTour(); }}><Icon name="play" /><span>Guided tour</span><small>Every section, start to finish</small></button>
+        <hr />
+        <button role="menuitem" onClick={() => { setHelpOpen(false); setView('guide'); }}><Icon name="bolt" /><span>Start here</span><small>The four-step QA workflow</small></button>
+        <button role="menuitem" onClick={() => { setHelpOpen(false); setView('academy'); }}><Icon name="book" /><span>How-to library</span><small>Every tool, with expected results</small></button>
+      </div> : null}
     </header>
-    <div className="workspace">
-      <nav className="side-nav" aria-label="ApiLens features"><div className="nav-label">Workspace</div>{views.map((item) => <button key={item.id} className="nav-item" aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><span>{item.label}</span><small>{item.hint}</small>{item.id === 'network' && data.requests.length ? <b>{data.requests.length}</b> : null}{item.id === 'server' && server.calls.length ? <b>{server.calls.length}</b> : null}</button>)}<div className="nav-support"><strong>Need help?</strong><span>A short walkthrough explains every section and exactly how to use it.</span><button className="btn sm primary" onClick={() => openTour(view)}>Explain this section</button><button className="btn sm" onClick={() => setView('guide')}>Open guide</button></div></nav>
-      <section id="main-content" className="main-stage" tabIndex={-1}>
-        {notice ? <div className="toast" role="status"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice(null)}>×</button></div> : null}
+    <div className="shell workspace">
+      <nav className="rail side-nav" aria-label="ApiLens sections">
+        {NAV.map((group) => <div key={group.group} role="group" aria-label={group.group}>
+          <div className="rail-label">{group.group}</div>
+          {group.items.map((item) => {
+            const count = counts[item.id] ?? 0;
+            return <button key={item.id} className="nav-item" aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)} title={`${item.label} — ${item.hint}`}>
+              <Icon name={item.icon} /><span className="label">{item.label}</span>{count ? <b className={`count ${item.id === 'mocks' ? 'mock' : ''}`}>{count}</b> : null}
+            </button>;
+          })}
+        </div>)}
+        <div className="rail-foot">
+          {data.state?.recording ? null : <div className="rail-card"><strong>Testing a journey?</strong><p>Record a session first: everything you do is kept as evidence.</p><button className="btn sm primary" onClick={() => void toggleRecording()}>Record session</button></div>}
+        </div>
+      </nav>
+      <section id="main-content" className="stage main-stage" tabIndex={-1}>
+        {notice ? <div className="toast2" role="status"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice(null)}>×</button></div> : null}
         {data.error ? <div className="banner blocked" role="alert">{data.error}</div> : null}
         {view === 'guide' ? <Guide state={data.state} requestCount={data.requests.length} onFinish={finishOnboarding} onView={setView} onRecord={() => void toggleRecording()} onTour={() => openTour()} onRepair={() => void runAction('repair', async () => { await send({ type: 'engine:repair', tabId: inspectedTabId() }); }, 'Page hooks repaired.')} /> : null}
         {view === 'setup' ? <IntegrationSetup state={data.state} onView={setView} onNotice={setNotice} /> : null}
@@ -181,9 +264,21 @@ function Panel(): JSX.Element {
           onEnableStaticCapture={() => void enableStaticCapture()}
           onNotice={setNotice}
         /> : null}
-        {view === 'server' ? <ServerView data={server} sessionId={data.state?.recording ? data.state.session?.id ?? null : null} onSettings={() => setView('settings')} onCopy={(value) => void copyToClipboard(value)} onNotice={setNotice} /> : null}
+        {view === 'server' ? <ServerView data={server} sessionId={data.state?.recording ? data.state.session?.id ?? null : null} onSettings={() => setView('settings')} onCopy={(value) => void copyToClipboard(value)} onNotice={setNotice} onOpenBrowserCalls={() => setView('network')} onOpenMocks={() => setView('mocks')} /> : null}
         {view === 'traces' ? <div className="scroll view-page"><ViewHeader overline="CORRELATION" title="Distributed traces" description="Browser, SDK and proxy spans grouped into customer journeys." />{data.traces.length ? <div className="trace-cards">{data.traces.map((trace, index) => <article className="trace-card" key={trace.traceId}><span className="badge accent">Trace {index + 1}</span><strong className="mono">{trace.traceId}</strong><p>{trace.spanCount} correlated span(s)</p><ServerTraceDetails trace={trace} /></article>)}</div> : <EmptyState title="No traces captured" copy="Enable trace headers for a controlled environment, start a session, and complete a journey." action="Open settings" onAction={() => setView('settings')} />}</div> : null}
-        {view === 'mocks' ? <div className="scroll view-page"><ViewHeader overline="CONTROLLED FAILURE TESTING" title="QA Mocks" description="Simulate errors only in approved environments. Rules are applied in priority order."><button className="btn primary" onClick={() => void runAction('repair', async () => { await send({ type: 'engine:repair', tabId: inspectedTabId() }); }, 'Repair completed and the Fetch/XHR self-test ran successfully.')}>Repair & test</button></ViewHeader><EngineDoctor state={data.state} onGuide={() => setView('academy')} />{data.state?.mockingBlockedReason ? <div className="banner blocked">Mocking blocked: {data.state.mockingBlockedReason}</div> : null}<div className="rule-list">{data.state?.rules.length ? data.state.rules.map((rule) => <RuleCard key={rule.id} rule={rule} busy={busy === `rule-${rule.id}`} onToggle={() => void toggleRule(rule)} />) : <EmptyState title="No mock rules yet" copy="Capture the exact request in Network, select it, and choose Create mock. This prevents accidental broad rules." action="Capture requests" onAction={() => setView('network')} />}</div></div> : null}
+        {view === 'mocks' ? <MocksView
+          browserRules={data.state?.rules ?? []}
+          browserBusy={busy}
+          browserBlockedReason={data.state?.mockingBlockedReason ?? null}
+          browserHealth={<EngineDoctor state={data.state} onGuide={() => setView('academy')} />}
+          onToggleBrowserRule={(rule) => void toggleRule(rule)}
+          onTurnOffBrowserRules={() => void saveRules((data.state?.rules ?? []).map((rule) => ({ ...rule, enabled: false, updatedAt: Date.now() })), 'All browser mocks are off.')}
+          onRepair={() => void runAction('repair', async () => { await send({ type: 'engine:repair', tabId: inspectedTabId() }); }, 'Repair completed and the Fetch/XHR self-test ran successfully.')}
+          server={server}
+          onNotice={setNotice}
+          onOpenBrowserCalls={() => setView('network')}
+          onOpenServerCalls={() => setView('server')}
+        /> : null}
         {view === 'evidence' ? <div className="scroll view-page"><ViewHeader overline="DEFECT & SIGN-OFF PROOF" title="Evidence pack" description="Export the current QA session in formats suited to engineers, audit and defect management." /><div className="evidence-layout"><div className="panelbox"><h2>{data.state?.session?.name ?? 'No active session'}</h2><dl className="evidence-summary"><div><dt>Requests</dt><dd>{data.requests.length}</dd></div><div><dt>Failures</dt><dd>{failed}</dd></div><div><dt>Mocked</dt><dd>{mocked}</dd></div><div><dt>Markers</dt><dd>{data.state?.session?.markers.length ?? 0}</dd></div></dl><button className="btn primary large" disabled={!data.state?.session || busy === 'export'} onClick={() => void exportEvidence()}>Export complete evidence pack</button><p className="muted">Includes HTML report, HAR, JSON and Markdown.</p></div><div className="export-guide"><h3>Before exporting</h3><ol><li>Finish the complete customer journey.</li><li>Stop recording so timings are final.</li><li>Review failed and mocked requests.</li><li>Add the exported pack to the defect or test evidence.</li></ol></div></div></div> : null}
         {view === 'academy' ? <FeatureAcademy onView={setView} onTour={openTour} /> : null}
         {view === 'settings' && data.state ? <Settings state={data.state} runAction={runAction} /> : null}
@@ -269,7 +364,6 @@ function IntegrationSetup({ state, onView, onNotice }: { state: ReturnType<typeo
 
 function Workflow({ number, title, copy, action, onAction, done }: { number: string; title: string; copy: string; action: string; onAction: () => void; done?: boolean }): JSX.Element { return <li><span>{number}</span><div><strong>{title}</strong><p>{copy}</p>{done ? <em>✓ Ready</em> : <button className="btn sm" onClick={onAction}>{action}</button>}</div></li>; }
 function ViewHeader({ overline, title, description, children }: { overline: string; title: string; description?: string; children?: React.ReactNode }): JSX.Element { return <div className="view-header"><div><span className="overline">{overline}</span><h1>{title}</h1>{description ? <p>{description}</p> : null}</div>{children ? <div className="view-actions">{children}</div> : null}</div>; }
-function RuleCard({ rule, busy, onToggle }: { rule: Rule; busy: boolean; onToggle: () => void }): JSX.Element { return <article className="rule-card"><button className={`switch ${rule.enabled ? 'on' : ''}`} role="switch" aria-checked={rule.enabled} aria-label={`${rule.enabled ? 'Disable' : 'Enable'} ${rule.name}`} onClick={onToggle} disabled={busy}><span /></button><div className="rule-main"><div><strong>{rule.name}</strong><span className="badge mock">{rule.action.type}</span></div><p>{rule.description || `${rule.conditions.length} match condition(s)`}</p><code>{rule.conditions.map((condition) => `${condition.field} ${condition.operator} ${condition.value}`).join(' · ')}</code></div><div className="rule-count">Applied<strong>{rule.appliedCount}</strong></div></article>; }
 function EmptyState({ title, copy, action, onAction }: { title: string; copy: string; action: string; onAction: () => void }): JSX.Element { return <div className="empty-state"><span aria-hidden="true">◎</span><h2>{title}</h2><p>{copy}</p><button className="btn primary" onClick={onAction}>{action}</button></div>; }
 function SettingToggle({ label, description, checked, onChange }: { label: string; description: string; checked: boolean; onChange: (checked: boolean) => void }): JSX.Element { return <label className="setting-toggle"><span><strong>{label}</strong><small>{description}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><i aria-hidden="true" /></label>; }
 
@@ -287,7 +381,7 @@ function EngineDoctor({ state, onGuide }: { state: ReturnType<typeof usePanelDat
 
 function FeatureAcademy({ onView, onTour }: { onView: (view: View) => void; onTour: (target?: View) => void }): JSX.Element {
   const lessons: Array<{ title: string; value: string; steps: string[]; result: string; target: View; safety?: string }> = [
-    { title: 'QA Sessions', value: 'Keep one customer journey and its evidence together.', steps: ['Open the target IE market page.', 'Click Start QA session in the header.', 'Perform one complete journey, then stop recording.'], result: 'A named session containing requests, spans, markers and active rules.', target: 'network' },
+    { title: 'QA Sessions', value: 'Keep one customer journey and its evidence together.', steps: ['Open the target IE market page.', 'Click Record session in the header.', 'Perform one complete journey, then stop recording.'], result: 'A named session containing requests, spans, markers and active rules.', target: 'network' },
     { title: 'Network Capture', value: 'Find the exact API behind a UI action.', steps: ['Start a session and reload the page.', 'Perform the UI action.', 'Filter by path, method or status and select the request.'], result: 'Headers, payload, source, status and duration for the real call.', target: 'network' },
     { title: 'QA Mock Engine', value: 'Prove graceful handling of controlled failures.', steps: ['Run Repair & test until all five checks pass.', 'Create a rule from the captured request.', 'Enable it, repeat the UI action and inspect the Mocked badge.'], result: 'A synthetic response with X-ApiLens-Mocked evidence.', target: 'mocks', safety: 'Never use broad rules on an unapproved environment.' },
     { title: 'Failure Scenarios', value: 'Cover service, auth, network and payload resilience.', steps: ['Choose status/503, rate limit/429, timeout or connection failure.', 'Add delay or payload mutation when required.', 'Use once or n-times mode for retry testing.'], result: 'Repeatable negative tests without changing backend data.', target: 'mocks' },
@@ -302,7 +396,7 @@ function FeatureAcademy({ onView, onTour }: { onView: (view: View) => void; onTo
     { title: 'Security & Redaction', value: 'Protect credentials and personal information by default.', steps: ['Keep built-in redaction rules enabled.', 'Review captured bodies before sharing.', 'Limit retention and maximum body size.'], result: 'Local-first evidence with sensitive values removed.', target: 'settings' },
     { title: 'Accessibility Workflow', value: 'Use the extension without mouse-only dependencies.', steps: ['Use Tab and Shift+Tab through controls.', 'Use Enter/Space on rows, switches and actions.', 'Choose system theme and reduced-motion OS preference.'], result: 'Visible focus, semantic status and usable contrast.', target: 'settings' },
   ];
-  return <div className="scroll view-page academy-page"><ViewHeader overline="COMPLETE PRODUCT GUIDE" title="Feature academy" description="What every tool does, how to use it, and what evidence to expect."><button className="btn primary" onClick={() => onTour()}>Take the walkthrough</button></ViewHeader><div className="academy-intro"><strong>Recommended VOIS IE path</strong><span>Session → Capture → Mock → Verify recovery → Trace → Export evidence</span></div><div className="lesson-grid">{lessons.map((lesson, index) => <article className="lesson-card" key={lesson.title}><header><span>{String(index + 1).padStart(2, '0')}</span><div><h2>{lesson.title}</h2><p>{lesson.value}</p></div></header><ol>{lesson.steps.map((step) => <li key={step}>{step}</li>)}</ol><div className="expected"><strong>Expected value</strong><span>{lesson.result}</span></div>{lesson.safety ? <div className="lesson-safety"><strong>Safety</strong> {lesson.safety}</div> : null}<div className="row"><button className="btn" onClick={() => onView(lesson.target)}>Open {lesson.title}</button><button className="btn sm link" onClick={() => onTour(lesson.target)}>Explain it</button></div></article>)}</div></div>;
+  return <div className="scroll view-page academy-page"><ViewHeader overline="COMPLETE PRODUCT GUIDE" title="How-to library" description="What every tool does, how to use it, and what evidence to expect."><button className="btn primary" onClick={() => onTour()}>Take the walkthrough</button></ViewHeader><div className="academy-intro"><strong>Recommended VOIS IE path</strong><span>Session → Capture → Mock → Verify recovery → Trace → Export evidence</span></div><div className="lesson-grid">{lessons.map((lesson, index) => <article className="lesson-card" key={lesson.title}><header><span>{String(index + 1).padStart(2, '0')}</span><div><h2>{lesson.title}</h2><p>{lesson.value}</p></div></header><ol>{lesson.steps.map((step) => <li key={step}>{step}</li>)}</ol><div className="expected"><strong>Expected value</strong><span>{lesson.result}</span></div>{lesson.safety ? <div className="lesson-safety"><strong>Safety</strong> {lesson.safety}</div> : null}<div className="row"><button className="btn" onClick={() => onView(lesson.target)}>Open {lesson.title}</button><button className="btn sm link" onClick={() => onTour(lesson.target)}>Explain it</button></div></article>)}</div></div>;
 }
 
 function Settings({ state, runAction }: { state: NonNullable<ReturnType<typeof usePanelData>['state']>; runAction: (name: string, task: () => Promise<void>, success: string) => Promise<void> }): JSX.Element {
