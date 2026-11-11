@@ -1,5 +1,5 @@
 import { redactBody, redactHeaders, safeUrlParts } from './redaction';
-import type { CapturedBody, ServerCall } from './types';
+import { MIDDLEWARE_HEADER, type CapturedBody, type ServerCall } from './types';
 
 /**
  * Edge middleware capture, `@apilens/next-sdk/edge`.
@@ -126,8 +126,47 @@ function record(input: {
     requestHeaders: redactHeaders(input.requestHeaders), responseHeaders: redactHeaders(input.responseHeaders),
     requestBody: input.request.body, responseBody: input.response.body,
     requestBodyOmitted: input.request.omitted, responseBodyOmitted: input.response.omitted,
-    error: input.error, mockedBy: null,
+    error: input.error, mockedBy: null, stage: 'middleware',
   };
+}
+
+/** True when Next will go on to render the page (or a rewrite target) after this middleware response. */
+function continuesToApp(response: Response): boolean {
+  return response.headers.get('x-middleware-next') === '1' || response.headers.has('x-middleware-rewrite');
+}
+
+/**
+ * Hands the run's ids to the request Next forwards to the app, through the
+ * same response headers `NextResponse.next({ request: { headers } })` sets,
+ * so the page's server capture continues this trace.
+ */
+function linkDownstream<Res>(result: Res, request: Request, link: string): Res {
+  let response: Response;
+  if (result === undefined || result === null) {
+    // Returning nothing means "continue"; an explicit next() response is equivalent.
+    response = new Response(null, { headers: { 'x-middleware-next': '1' } });
+  } else if (result instanceof Response && continuesToApp(result)) {
+    response = result;
+  } else {
+    return result;
+  }
+  try {
+    const headers = response.headers;
+    const override = headers.get('x-middleware-override-headers');
+    // Without an override list Next keeps the incoming headers; with one it keeps exactly those listed.
+    const names = override !== null
+      ? override.split(',').map((name) => name.trim()).filter(Boolean)
+      : [...request.headers.keys()].filter((name) => !name.startsWith('x-middleware-'));
+    if (override === null) {
+      for (const name of names) headers.set(`x-middleware-request-${name}`, request.headers.get(name) ?? '');
+    }
+    if (!names.includes(MIDDLEWARE_HEADER)) names.push(MIDDLEWARE_HEADER);
+    headers.set(`x-middleware-request-${MIDDLEWARE_HEADER}`, link);
+    headers.set('x-middleware-override-headers', names.join(','));
+  } catch {
+    return result; // Immutable headers (Response.redirect and friends): leave the response as it is.
+  }
+  return response as unknown as Res;
 }
 
 /**
@@ -213,6 +252,10 @@ export function withApiLens<Req extends Request, Evt, Res>(
     let error: string | null = null;
     try {
       result = await store.run(run, () => middleware(request, event));
+      // Only runs that will be recorded are linked, so most requests pass through untouched.
+      if (run.pending.length > 0 || options.recordAllRequests === true) {
+        return linkDownstream(result, request, `${run.traceId}-${run.spanId}`);
+      }
       return result;
     } catch (cause) {
       error = cause instanceof Error ? cause.name : 'MiddlewareError';

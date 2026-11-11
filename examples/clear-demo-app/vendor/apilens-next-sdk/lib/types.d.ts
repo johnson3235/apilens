@@ -7,6 +7,12 @@
  * here means changing it there too.
  */
 export declare const CONTROL_PROTOCOL_VERSION = 2;
+/**
+ * Request header the Edge wrapper adds to the request it lets through:
+ * `<traceId>-<spanId>` of the middleware run, so the page continues its trace
+ * and the extension can show the middleware under it.
+ */
+export declare const MIDDLEWARE_HEADER = "x-apilens-middleware";
 /** How a captured body was encoded for transport. */
 export type BodyEncoding = 'utf8' | 'base64';
 /** A captured request or response payload, always bounded and redacted. */
@@ -60,6 +66,15 @@ export interface ServerCall {
     error: string | null;
     /** Name of the server mock rule that produced this response, when any. */
     mockedBy: string | null;
+    /**
+     * `middleware` for an Edge middleware run and the calls it made. Absent on
+     * calls from SDKs older than 0.5.
+     */
+    stage?: 'middleware' | null;
+    /** The middleware run that let this page request through, so the extension can nest it. */
+    middlewareSpanId?: string | null;
+    /** `hit` when Next answered the fetch from its own cache (or deduplicated it) and no backend call was made. */
+    cache?: 'hit' | null;
 }
 export type MockMatchType = 'glob' | 'regex' | 'contains' | 'equals' | 'startsWith';
 export interface ServerMockMatch {
@@ -150,6 +165,39 @@ export interface ControlHealth {
         dropped: number;
         lastError: string | null;
     };
+    /** What the request hook saw and why it skipped requests (optional for older SDKs). */
+    capture?: CaptureStats;
+}
+/**
+ * Answers "connected, but why is nothing showing?" from the server's side.
+ * Every counter is since the process started.
+ */
+export interface CaptureStats {
+    /** True once `install()` has hooked incoming requests and outgoing calls. */
+    installed: boolean;
+    /** `boot` when `install()` ran from instrumentation.ts; `first-connection` when the control route had to do it. */
+    installedBy: 'boot' | 'first-connection' | null;
+    /** Incoming requests that reached the hook, excluding Next assets and the control endpoint. */
+    requestsSeen: number;
+    requestsRecorded: number;
+    skipped: {
+        /** `autoInstrument.ignorePaths`. */
+        ignoredPath: number;
+        /** No `x-qa-session-id` header and `captureWithoutSession` is off. */
+        noSession: number;
+        /** The request's origin is not in `allowedAppOrigins` and the control plane was never reached through it. */
+        originNotAllowed: number;
+        /** GET page loads that made no backend call (`recordAllRequests` records them). */
+        noBackendCall: number;
+    };
+    /** Most recent origin rejected by `allowedAppOrigins`, to copy into the config. */
+    lastRejectedOrigin: string | null;
+    /** Origins accepted because the extension reached the control plane through them. */
+    learnedOrigins: string[];
+    backendCalls: number;
+    cacheHits: number;
+    middlewareRuns: number;
+    lastRequestAt: number | null;
 }
 export interface ControlCallsResponse {
     processId: string;

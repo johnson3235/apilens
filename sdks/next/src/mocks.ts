@@ -331,6 +331,7 @@ export function sanitizeRule(input: unknown, now: number): ServerMockRule | null
     applyLimit: typeof raw.applyLimit === 'number' ? Math.max(0, Math.trunc(raw.applyLimit)) : undefined,
     appliedCount: typeof raw.appliedCount === 'number' ? Math.max(0, Math.trunc(raw.appliedCount)) : 0,
     createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : now,
-    updatedAt: now,
+    // Kept as sent, so the same rule set has the same revision on every pod.
+    updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? Math.min(raw.updatedAt, now + 60_000) : now,
   };
 }

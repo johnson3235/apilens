@@ -168,7 +168,10 @@ export function createControlHandler(context: ControlContext): (request: Request
 
       if (operation === 'calls') {
         if (request.method === 'GET') {
-          const since = Number(url.searchParams.get('since') ?? '0');
+          // Behind a load balancer each poll may reach a different pod, so the
+          // extension sends one cursor per process and each pod reads its own.
+          const cursors = url.searchParams.get('cursors');
+          const since = cursors !== null ? cursorFor(cursors, context.processId) : Number(url.searchParams.get('since') ?? '0');
           const limit = Number(url.searchParams.get('limit') ?? '200');
           const cursor = Number.isFinite(since) && since > 0 ? Math.trunc(since) : 0;
           const page = context.buffer.since(cursor, Number.isFinite(limit) ? Math.min(Math.trunc(limit), 500) : 200);
@@ -253,6 +256,15 @@ export function createControlHandler(context: ControlContext): (request: Request
       return reply(request, 500, { error: error instanceof Error ? error.message : 'Control request failed.' });
     }
   };
+}
+
+/** This process's entry in `cursors=<processId>:<seq>,…`; 0 when the extension has not polled it yet. */
+export function cursorFor(cursors: string, processId: string): number {
+  for (const entry of cursors.split(',').slice(0, 64)) {
+    const [id, seq] = entry.split(':');
+    if (id === processId) return Number(seq);
+  }
+  return 0;
 }
 
 export function buildRulesRevision(rules: ServerMockRule[]): string {

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.withApiLens = withApiLens;
 const redaction_1 = require("./redaction");
+const types_1 = require("./types");
 const AMBIENT_SESSION_ID = 'apilens-ambient';
 const MAX_BATCH = 50;
 const MIN_TOKEN_LENGTH = 24;
@@ -84,8 +85,50 @@ function record(input) {
         requestHeaders: (0, redaction_1.redactHeaders)(input.requestHeaders), responseHeaders: (0, redaction_1.redactHeaders)(input.responseHeaders),
         requestBody: input.request.body, responseBody: input.response.body,
         requestBodyOmitted: input.request.omitted, responseBodyOmitted: input.response.omitted,
-        error: input.error, mockedBy: null,
+        error: input.error, mockedBy: null, stage: 'middleware',
     };
+}
+/** True when Next will go on to render the page (or a rewrite target) after this middleware response. */
+function continuesToApp(response) {
+    return response.headers.get('x-middleware-next') === '1' || response.headers.has('x-middleware-rewrite');
+}
+/**
+ * Hands the run's ids to the request Next forwards to the app, through the
+ * same response headers `NextResponse.next({ request: { headers } })` sets,
+ * so the page's server capture continues this trace.
+ */
+function linkDownstream(result, request, link) {
+    let response;
+    if (result === undefined || result === null) {
+        // Returning nothing means "continue"; an explicit next() response is equivalent.
+        response = new Response(null, { headers: { 'x-middleware-next': '1' } });
+    }
+    else if (result instanceof Response && continuesToApp(result)) {
+        response = result;
+    }
+    else {
+        return result;
+    }
+    try {
+        const headers = response.headers;
+        const override = headers.get('x-middleware-override-headers');
+        // Without an override list Next keeps the incoming headers; with one it keeps exactly those listed.
+        const names = override !== null
+            ? override.split(',').map((name) => name.trim()).filter(Boolean)
+            : [...request.headers.keys()].filter((name) => !name.startsWith('x-middleware-'));
+        if (override === null) {
+            for (const name of names)
+                headers.set(`x-middleware-request-${name}`, request.headers.get(name) ?? '');
+        }
+        if (!names.includes(types_1.MIDDLEWARE_HEADER))
+            names.push(types_1.MIDDLEWARE_HEADER);
+        headers.set(`x-middleware-request-${types_1.MIDDLEWARE_HEADER}`, link);
+        headers.set('x-middleware-override-headers', names.join(','));
+    }
+    catch {
+        return result; // Immutable headers (Response.redirect and friends): leave the response as it is.
+    }
+    return response;
 }
 /**
  * Wraps a Next.js middleware so the backend calls it makes reach ApiLens.
@@ -173,6 +216,10 @@ function withApiLens(middleware, options) {
         let error = null;
         try {
             result = await store.run(run, () => middleware(request, event));
+            // Only runs that will be recorded are linked, so most requests pass through untouched.
+            if (run.pending.length > 0 || options.recordAllRequests === true) {
+                return linkDownstream(result, request, `${run.traceId}-${run.spanId}`);
+            }
             return result;
         }
         catch (cause) {
