@@ -1,8 +1,27 @@
-# ApiLens Next SDK 0.3.0 — opt-in QA server tracing, payload capture and server mocking
+# ApiLens Next SDK 0.4.0 — opt-in QA server tracing, payload capture and server mocking
 
 Standalone Node 20+ package. No Next.js runtime dependency, no workspace dependencies, no Express custom server. This is a new adapter; `@apilens/node-sdk` is still the separate legacy Express/http SDK.
 
-## What is new in 0.3.0: zero-touch capture
+## What is new in 0.4.0: hardening from the CLEAR-APP review
+
+Every item raised in the 0.3.0 review of the CLEAR-APP spike is addressed. Upgrading needs no code change; each new behaviour is safe by default.
+
+| Review finding | 0.4.0 |
+|---|---|
+| A short or missing control token threw in the constructor and stopped boot, even with the SDK off | **Never throws.** The affected feature is switched off and reported in `diagnostics.configIssues`, the control plane's `/health` and one `console.warn` (no secret values). While `enabled` is false nothing is validated or reported. |
+| The control plane needed its own route file | **Served by the request hook** at `control.path` (default `/api/__apilens`) before Next routes the request. The app footprint is the singleton and two lines in `instrumentation.ts`. The route file is only needed with `control.relay` (serverless). |
+| Edge middleware (session, journey, `billingAccountMiddleware`) was invisible | **`@apilens/next-sdk/edge`**: `withApiLens(middleware, options)` records the middleware run and its `fetch` calls inside the Edge sandbox and posts them to the control plane. See step 3d. |
+| Datadog agent calls appeared under random requests; no outgoing filter | **`ignoreOutgoing`** (hosts, `host:port`, `:port`, URL prefixes, RegExp). Tracer agents (`:8126`, OTLP `:4317/:4318`, `DD_AGENT_HOST`, `DD_TRACE_AGENT_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`) are always ignored. |
+| Background work inherited the in-flight request's context | Calls that **start after the response finished** are skipped and counted (`diagnostics.lateCallsSkipped`); `autoInstrument.recordAfterResponse: true` keeps them. |
+| Worst case ≈ 128 MB held in the pod | **`control.maxBufferBytes`** (default 32 MB) caps buffered captures; oldest are evicted first, and `/health` reports `bufferedBytes`. |
+| Synchronous gunzip/brotli on the event loop | Decompression runs **asynchronously** on libuv's thread pool. |
+| Process-wide patches stayed until shutdown | `shutdown()` now **restores** `http.request`/`get`, `Server.emit` and `fetch`, unless another library wrapped them since (then the patch stays, inert). |
+| Shared server mixed every tester's traffic into one session | Extension 1.4.0 **tags the recording tab's own requests** (page loads, RSC, server actions, fetch) with `x-qa-session-id`; the Server API view defaults to **My session**. |
+| Redaction matched key substrings only | Adds `msisdn`, phone/mobile, e-mail, date-of-birth keys (whole-key, so `mobilePlanName` survives) and **e-mail and IBAN values** anywhere in a payload. |
+| Token rotation relied on discipline | **`control.expiresAt`**: after it, the control plane answers 404. |
+| Not on npm | `.github/workflows/next-sdk-release.yml` builds, tests and attaches the tarball to a GitHub Release on a `next-sdk-v*` tag. |
+
+## What was new in 0.3.0: zero-touch capture
 
 One boot hook in `instrumentation.ts` now captures **every** incoming request (page renders, RSC payloads, Server Components, server actions and route handlers) together with the backend `fetch` calls it makes. Page, layout and route files never change. A new page is covered the moment it exists.
 
@@ -55,7 +74,11 @@ Existing 0.1.0 integrations keep working unchanged; every new capability is opt-
 - Optionally **request and response payloads**, read from a throwaway `clone()` so the application's own stream is never consumed, capped at `captureBodies.maxBytes`, and redacted before buffering.
 - Promise-based route params and NextRequest subclasses pass through unchanged.
 
-Not captured: Edge-runtime routes and middleware, background jobs outside a request, DB queries, gRPC/raw TCP clients, third-party service internals, and the first request a dev server handles before `register()` has run. Cached responses are observed as fetch invocations, not necessarily wire requests. Review URLs and diagnostic headers for application-specific PII before sharing.
+- **Edge middleware**, through `@apilens/next-sdk/edge` (step 3d).
+
+Not captured: Edge-runtime *route handlers*, background jobs outside a request (and, by default, calls that start after the response was sent), DB queries, gRPC/raw TCP clients, third-party service internals, and the first request `next dev` handles before `register()` has run.
+
+**Next fetch-cache hits** are not seen: Next's own fetch patch answers a cached call before it reaches the SDK, so no backend call happened and none is recorded. Calls with `cache: 'no-store'` (most of CLEAR-APP) and every cache miss are captured. Review URLs and diagnostic headers for application-specific PII before sharing.
 
 ## Choosing a transport
 
@@ -76,7 +99,14 @@ cd sdks/next
 pnpm pack
 ```
 
-This creates `apilens-next-sdk-0.3.0.tgz`. Copy that tarball to an approved artifact location available to CLEAR-APP (and its CI). It contains compiled JS and TypeScript declarations; no `workspace:*` install is needed. It is not published to npm. Install using the project's Yarn version, for example `yarn add file:./vendor/apilens-next-sdk-0.3.0.tgz` if vendor artifacts are permitted. Do not reference a developer-only absolute path in a committed lockfile.
+This creates `apilens-next-sdk-0.4.0.tgz`. It contains compiled JS and TypeScript declarations, has no runtime dependencies and needs no `workspace:*` install. It is not published to npm.
+
+Two ways to make it available to CLEAR-APP and its CI:
+
+- **GitHub Release (recommended).** Pushing a tag `next-sdk-v0.4.0` runs `.github/workflows/next-sdk-release.yml`, which builds, tests, packs and attaches `apilens-next-sdk-0.4.0.tgz` and its SHA-256 to a release. Install from the release URL (`yarn add https://github.com/<owner>/apilens/releases/download/next-sdk-v0.4.0/apilens-next-sdk-0.4.0.tgz`), or mirror it into the approved artifact registry. A private repository needs an authenticated download, so mirroring is usually simpler.
+- **Vendored tarball.** If vendor artifacts are permitted: `yarn add file:./vendor/apilens-next-sdk-0.4.0.tgz`.
+
+Never reference a developer-only absolute path in a committed lockfile.
 
 ## CLEAR-APP integration (FE change required)
 
@@ -115,14 +145,26 @@ export const apiLens = (processState.__clearApiLens ??= new ApiLensNextSDK({
 
   control: {
     enabled: true,
+    // Missing or short: the control plane stays off and the app still boots.
     token: process.env.APILENS_CONTROL_TOKEN ?? '',
     bufferSize: 500,
+    maxBufferBytes: 32 * 1024 * 1024, // memory ceiling for captures in this pod
+    expiresAt: process.env.APILENS_CONTROL_EXPIRES_AT, // e.g. 2026-11-30T18:00:00Z
+  },
+
+  // Datadog and OTLP agents are always ignored; add anything else that is not QA traffic.
+  ignoreOutgoing: ['launchdarkly.com', /\/healthz$/],
+
+  autoInstrument: {
+    ignorePaths: ['/api/check-session'], // the 60 s session poll would flood the buffer
   },
 
   // Optional: let server mocks short-circuit incoming routes too.
   allowRouteMocks: false,
 }));
 ```
+
+Configuration problems never stop the app. `apiLens.diagnostics.configIssues` lists what was switched off and why (for example a short token), and the extension's Settings → *Test connection* shows the same list.
 
 The `server-only` marker must be available in the target Next project. Do not import this module from Client Components or Edge middleware. Restart the server after configuration changes; the singleton avoids duplicated dev/HMR instrumentation.
 
@@ -141,9 +183,9 @@ export async function register() {
 }
 ```
 
-Preserve existing register logic. Follow the target Next version's instrumentation configuration (the repository's Next 14 demo enables `experimental.instrumentationHook`). Do not use `src/middleware.ts`, which the FE team identified as Edge.
+Preserve existing register logic. Follow the target Next version's instrumentation configuration (the repository's Next 14 demo enables `experimental.instrumentationHook`).
 
-**This is the whole integration.** Every page, Server Component, server action and route handler is now captured with its backend calls. Do not edit page, layout or route files. Steps 3 and 3b below are optional refinements.
+**This is the whole Node integration.** Every page, Server Component, server action and route handler is captured with its backend calls, and the control plane is served from the same hook, so no route file is needed. Do not edit page, layout or route files. Steps 3–3c are optional refinements; step 3d adds Edge middleware.
 
 ### 3. Optional: wrap a route explicitly
 
@@ -213,7 +255,39 @@ A process that has not served the extension itself then does three things:
 
 The process the extension polls keeps its captures locally. Relay failures never break a page; `diagnostics.relayFailures` and `diagnostics.lastRelayError` say why. On a single Node server (`next start`, a container) leave `relay` unset.
 
-### 4. Mount the control plane
+### 3d. Edge middleware
+
+Next 14 runs `src/middleware.ts` in the Edge sandbox, with its own `fetch` and no Node `http`, so the Node hooks above never see its calls (session creation, journey bootstrap, `billingAccountMiddleware`). Wrap the exported middleware once:
+
+```ts
+// src/middleware.ts
+import { withApiLens } from '@apilens/next-sdk/edge';
+
+async function middleware(request: NextRequest) {
+  // existing middleware, unchanged
+}
+
+export default withApiLens(middleware, {
+  enabled: process.env.APILENS_ENABLED === 'true',
+  controlToken: process.env.APILENS_CONTROL_TOKEN,
+  serviceName: 'clear-app-middleware',
+  captureWithoutSession: true,
+  // Behind a load balancer, deliver to this pod rather than the public host:
+  // ingestUrl: `http://127.0.0.1:${process.env.PORT ?? 3000}/api/__apilens`,
+});
+export const config = { /* existing matcher, unchanged */ };
+```
+
+(Keep whichever export style the file uses: `export const middleware = withApiLens(...)` works the same.)
+
+- Each run whose middleware made a backend call, redirected (3xx) or failed is recorded as a call from `serviceName`, with its `fetch` calls (bodies redacted, 32 KB each by default) nested under it.
+- Captures are posted to the control plane's `/ingest` through `event.waitUntil`, so the response is never delayed; a failed delivery is dropped silently.
+- Disabled, or with a token under 24 characters, `withApiLens` returns the middleware unchanged. The `/edge` entry imports nothing from Node.
+- Server mocks do not apply inside middleware: rules live in the Node process. The middleware run is a separate call from the page it let through; the session id links them in the panel.
+
+### 4. Optional: mount the control plane as a route
+
+Only needed with `control.relay` (serverless hosts), where the extension must reach one specific function. On a single Node server the request hook serves the control plane itself; a route file, if present, is simply never reached.
 
 Create `src/app/api/%5F_apilens/[[...segments]]/route.ts`. The folder name is deliberate: the App Router treats any folder starting with `_` as private and never routes it, so a literal `__apilens` folder silently returns 404. `%5F` is Next's URL-encoded underscore, and the route is served at `/api/__apilens`.
 
@@ -246,8 +320,9 @@ Security properties:
 
 - The token is compared in constant time against a SHA-256 digest, so its length and content cannot be probed by timing.
 - Ten consecutive failures trigger a one-minute lockout; 600 requests per minute are allowed in total.
-- When `control.enabled` is false, or the token is shorter than 24 characters, every request returns `404` — a disabled control plane never advertises that ApiLens is installed.
-- `control.token` must differ from `agentToken`, so a leaked control token cannot be replayed against the agent.
+- When `control.enabled` is false, the token is shorter than 24 characters, or `control.expiresAt` has passed, every request returns `404` — a disabled control plane never advertises that ApiLens is installed. An unreadable `expiresAt` counts as expired.
+- `control.token` must differ from `agentToken`, so a leaked control token cannot be replayed against the agent. A reused token switches the control plane off (reported in `configIssues`); it never crashes the app.
+- Request bodies sent to the control plane are capped at 1 MB.
 - CORS headers are emitted **only** for origins listed in `control.allowedOrigins`. The browser extension authenticates by token and needs no entry there.
 
 This endpoint exposes captured traffic to anyone holding the token. Treat the token as a production-grade secret, keep the control plane off in any environment holding real customer data, and remove it from the deployment when the QA exercise ends.
@@ -298,7 +373,7 @@ Never point server mocks at an endpoint with real financial or order side effect
 - Bodies are read from a `clone()` branch; the application's stream is untouched and the tee's cancel promise is never awaited — awaiting it deadlocks until *both* branches cancel.
 - Recording happens off the request's critical path, so payload capture never adds latency to the application response. `await apiLens.flush()` drains it in a controlled test.
 - Oversized payloads are truncated and flagged, never silently dropped. Binary content types are skipped with a stated reason unless `includeBinary` is on.
-- Redaction runs on the write path, before anything is buffered: JSON is walked structurally so sensitive keys are removed even when their values look ordinary, and JWTs, bearer tokens and card-like digit runs are replaced wherever they appear.
+- Redaction runs on the write path, before anything is buffered. JSON is walked structurally, so sensitive keys are removed even when their values look ordinary: credentials and card/bank fields by key substring, and personal-data keys (`msisdn`, phone/mobile numbers, e-mail, date of birth) by whole key, so `mobilePlanName` stays readable. JWTs, bearer tokens, card-like digit runs, IBANs and e-mail addresses are replaced wherever they appear. Add application-specific keys with `redactKeys`.
 - Every omission carries a human-readable reason that the extension displays, so a blank payload panel is never ambiguous.
 
 Redaction is a strong default, not a universal PII guarantee. Review captured payloads before attaching them to a defect.
@@ -308,10 +383,18 @@ Redaction is a strong default, not a universal PII guarantee. Review captured pa
 1. Deploy CLEAR-APP with `APILENS_ENABLED=true` and a strong `APILENS_CONTROL_TOKEN` through approved configuration. Do not commit the token or edit tracked env files as a shortcut.
 2. Build and load the extension (`pnpm --filter @apilens/browser-extension check`, then load `apps/browser-extension/dist` unpacked).
 3. Open DevTools → **ApiLens** → **Settings** → *Instrumented server*. Paste the app origin (or the full `/api/__apilens` mount) and the control token, then use **Test connection** before saving.
-4. Open **Server API**. Use the application; incoming routes and their upstream calls appear within a poll interval, with Payload and Response tabs.
-5. Select a call → **Simulate a problem** → choose what should go wrong → **Save and turn on**. Rules created from a call apply to the next matching call only, unless the tester chooses *Every call*.
-6. **Traces** correlates server spans with browser requests for the same journey.
+4. **Start QA session** in the app's tab. While it records, the extension sends `x-qa-session-id` on every request that tab makes to the app's host, including page loads and server actions. On a shared dev server, **Server API → My session** then shows only your calls; **Everyone** shows all traffic. Turn this off with *Tag my traffic with my QA session* in Settings.
+5. Open **Server API**. Use the application; incoming routes and their upstream calls appear within a poll interval, with Payload and Response tabs.
+6. Select a call → **Simulate a problem** → choose what should go wrong → **Save and turn on**. Rules created from a call apply to the next matching call only, unless the tester chooses *Every call*.
+7. **Traces** correlates server spans with browser requests for the same journey.
 
 For the local agent path instead: run `pnpm --filter @apilens/agent build` and `pnpm agent`, keep `agentToken`, and inspect **Traces** as in 0.1.0. `apiLens.diagnostics` exposes accepted/dropped counts and a non-secret delivery error.
+
+## Runtime footprint
+
+- **Patches.** `install()` wraps `http.Server.prototype.emit`, `https.Server.prototype.emit`, `http(s).request`/`get` (with ESM bindings) and global `fetch`, all inside try/catch that falls back to the original. `shutdown()` restores them unless another library has wrapped them since. With `enabled` false nothing is patched.
+- **Memory.** At most `control.bufferSize` calls and `control.maxBufferBytes` bytes (default 500 and 32 MB); each body is capped at `captureBodies.maxBytes`.
+- **CPU.** Body copies are taken as bytes move; redaction and decompression run after the response finished, off the event loop where possible.
+- **Attribution.** Tracer and telemetry agents and `ignoreOutgoing` hosts pass through untouched (not captured, never mocked). Calls started after the response finished are skipped by default. Both are counted in `diagnostics`.
 
 Telemetry is best-effort, bounded to 1,000 queued spans with batches of 100, a two-second delivery timeout, and observable drop counters. Agent outages do not fail application requests. Flush after in-flight application work settles and then `await apiLens.shutdown()` during graceful termination. Abrupt serverless termination may lose queued spans and in-memory captures; this version targets a long-lived Node server.

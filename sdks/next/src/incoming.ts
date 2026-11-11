@@ -2,7 +2,12 @@ import {
   Server as HttpServer, type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type OutgoingMessage, type ServerResponse,
 } from 'node:http';
 import { Server as HttpsServer } from 'node:https';
-import { brotliDecompressSync, constants as zlib, gunzipSync, inflateSync } from 'node:zlib';
+import { promisify } from 'node:util';
+import { brotliDecompress, constants as zlib, gunzip, inflate } from 'node:zlib';
+
+const gunzipAsync = promisify(gunzip);
+const inflateAsync = promisify(inflate);
+const brotliAsync = promisify(brotliDecompress);
 
 /**
  * Process-level hook into every incoming Node HTTP request.
@@ -18,29 +23,43 @@ export type RequestHook = (req: IncomingMessage, res: ServerResponse, dispatch: 
 
 const HOOK = Symbol.for('apilens.next.requestHook');
 // On globalThis so dev/HMR re-evaluation of this module never patches twice.
-const state = globalThis as typeof globalThis & { [HOOK]?: { hook: RequestHook | null } };
+const state = globalThis as typeof globalThis & {
+  [HOOK]?: { hook: RequestHook | null; restore: () => void };
+};
 
 type Emit = (this: unknown, event: string | symbol, ...args: unknown[]) => boolean;
 
 export function setRequestHook(hook: RequestHook): void {
   if (!state[HOOK]) {
-    state[HOOK] = { hook: null };
+    const restorers: Array<() => void> = [];
     for (const proto of [HttpServer.prototype, HttpsServer.prototype] as unknown as { emit: Emit }[]) {
       const original = proto.emit;
-      proto.emit = function apiLensEmit(event, ...args) {
+      const patched: Emit = function apiLensEmit(event, ...args) {
         const dispatch = () => original.call(this, event, ...args);
         const active = state[HOOK]?.hook;
         if (event !== 'request' || !active) return dispatch();
         return active(args[0] as IncomingMessage, args[1] as ServerResponse, dispatch);
       };
+      proto.emit = patched;
+      // Restoring over someone else's later patch would silently remove theirs,
+      // so the patch is only undone while it is still the outermost one.
+      restorers.push(() => { if (proto.emit === patched) proto.emit = original; });
     }
+    state[HOOK] = { hook: null, restore: () => restorers.forEach((restore) => restore()) };
   }
   state[HOOK].hook = hook;
 }
 
-/** Detaches `hook` if it is still the active one; the patch itself stays inert. */
+/**
+ * Detaches `hook` if it is still the active one and puts `Server.emit` back.
+ * When another library has wrapped it since, the patch stays in place but inert.
+ */
 export function clearRequestHook(hook: RequestHook): void {
-  if (state[HOOK]?.hook === hook) state[HOOK].hook = null;
+  const current = state[HOOK];
+  if (current?.hook !== hook) return;
+  current.hook = null;
+  current.restore();
+  delete state[HOOK];
 }
 
 export function nodeHeaders(raw: IncomingHttpHeaders | OutgoingHttpHeaders): Headers {
@@ -145,16 +164,19 @@ export function tapWrites(message: OutgoingMessage, cap: number): BodyTap {
 /**
  * Undoes transfer compression (`next start` gzips by default) on a possibly
  * truncated capture. Returns null when the encoding is unknown or corrupt.
+ *
+ * Runs on libuv's thread pool, so decompressing a captured body never blocks
+ * the event loop that serves the application.
  */
-export function decodeBody(bytes: Buffer, contentEncoding: string | null, cap: number): Buffer | null {
+export async function decodeBody(bytes: Buffer, contentEncoding: string | null, cap: number): Promise<Buffer | null> {
   const encoding = (contentEncoding ?? '').trim().toLowerCase();
   if (!encoding || encoding === 'identity') return bytes;
   // A bounded output keeps a decompression bomb out of memory.
   const limits = { maxOutputLength: Math.max(cap * 4, 1 << 20) };
   try {
-    if (encoding === 'gzip' || encoding === 'x-gzip') return gunzipSync(bytes, { ...limits, finishFlush: zlib.Z_SYNC_FLUSH });
-    if (encoding === 'deflate') return inflateSync(bytes, { ...limits, finishFlush: zlib.Z_SYNC_FLUSH });
-    if (encoding === 'br') return brotliDecompressSync(bytes, { ...limits, finishFlush: zlib.BROTLI_OPERATION_FLUSH });
+    if (encoding === 'gzip' || encoding === 'x-gzip') return await gunzipAsync(bytes, { ...limits, finishFlush: zlib.Z_SYNC_FLUSH });
+    if (encoding === 'deflate') return await inflateAsync(bytes, { ...limits, finishFlush: zlib.Z_SYNC_FLUSH });
+    if (encoding === 'br') return await brotliAsync(bytes, { ...limits, finishFlush: zlib.BROTLI_OPERATION_FLUSH });
   } catch {
     return null;
   }

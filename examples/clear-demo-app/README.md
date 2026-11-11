@@ -22,11 +22,12 @@ The three backend calls behind billing:
 
 ## How it is wired
 
-- **`lib/apilens.ts`**: the SDK singleton and its whole configuration. It is on only when `APILENS_ENABLED=true` and the token has 24+ characters. `autoInstrument.ignorePaths` keeps the dummy services out of the incoming captures.
-- **`instrumentation.ts`**: calls `apiLens.install()` at boot. This is the only wiring: every page, route and server action is then captured automatically.
+- **`lib/apilens.ts`**: the SDK singleton and its whole configuration. It is on when `APILENS_ENABLED=true`; a missing or short token keeps only the control endpoint off (the app still starts, and `/health` explains why). `autoInstrument.ignorePaths` keeps the dummy services out of the incoming captures.
+- **`instrumentation.ts`**: calls `apiLens.install()` at boot. This is the only Node wiring: every page, route and server action is then captured automatically, and the control endpoint is served from the same hook.
+- **`middleware.ts`**: a CLEAR-style session check running in the Edge sandbox, wrapped with `withApiLens` from `@apilens/next-sdk/edge`, so its session lookup shows up as a `clear-demo-middleware` call.
 - **`app/myaccount/billing/page.tsx`**: the server-rendered page. It contains no ApiLens code; its render shows up as a page call with its fetches as backend calls.
 - **`app/api/[...path]/route.ts`**: one route for every API path:
-  - `/api/__apilens/*`: the ApiLens control endpoint, token-protected
+  - `/api/__apilens/*`: the ApiLens control endpoint, token-protected (needed here only for Vercel relay; on a Node server the SDK answers it first)
   - `/api/billing/*`: the BFF the Dashboard calls (plain handlers)
   - `/api/services/*`: the dummy backend services
 - **Relay**: on Vercel the billing page and the API route run as **separate functions with separate memory**. The SDK's `control.relay` (on automatically when `VERCEL=1`) makes the page function send its captured calls to the API function the extension polls, and read the mock rules from it.
@@ -67,7 +68,7 @@ node scripts/check-live.mjs https://<project>.vercel.app <APILENS_CONTROL_TOKEN>
 The script:
 
 1. Loads the server-rendered billing page.
-2. Checks that ApiLens captured it as a page call with 3 linked backend calls.
+2. Checks that ApiLens captured it as a page call with 3 linked backend calls, and the Edge middleware's session lookup with its `msisdn` redacted.
 3. Proves a one-shot "Service is down" mock breaks only the Next bill card, and only once.
 4. Removes the mock and checks the Dashboard endpoints.
 

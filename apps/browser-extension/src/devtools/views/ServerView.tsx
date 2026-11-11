@@ -84,6 +84,7 @@ function ServerHealthStrip({ data }: { data: ServerData }): JSX.Element | null {
     { label: 'Route mocks', ok: health.routeMocksEnabled, detail: health.routeMocksEnabled ? 'Incoming routes can be short-circuited' : 'Outbound calls only' },
   ];
   const passing = checks.filter((check) => check.ok).length;
+  const issues = health.configIssues ?? [];
 
   // Collapsed by default: a DevTools panel is short, and the call list is what
   // the tester came for. The summary still answers "is capture working?".
@@ -99,6 +100,18 @@ function ServerHealthStrip({ data }: { data: ServerData }): JSX.Element | null {
           <div><strong>{check.label}</strong><small>{check.detail}</small></div>
         </div>
       ))}
+      {typeof health.bufferedBytes === 'number' && health.maxBufferBytes ? (
+        <div className={health.bufferedBytes > health.maxBufferBytes * 0.8 ? 'neutral' : 'pass'}>
+          <span aria-hidden="true">{health.bufferedBytes > health.maxBufferBytes * 0.8 ? '!' : '✓'}</span>
+          <div><strong>Server memory</strong><small>{formatSize(health.bufferedBytes)} of {formatSize(health.maxBufferBytes)} used by captures</small></div>
+        </div>
+      ) : null}
+      {issues.map((issue) => (
+        <div key={`${issue.setting}:${issue.problem}`} className="neutral">
+          <span aria-hidden="true">!</span>
+          <div><strong>{issue.setting}</strong><small>{issue.problem}</small></div>
+        </div>
+      ))}
       {health.droppedCalls > 0 ? (
         <div className="neutral">
           <span aria-hidden="true">!</span>
@@ -111,16 +124,24 @@ function ServerHealthStrip({ data }: { data: ServerData }): JSX.Element | null {
 
 export function ServerView({
   data,
+  sessionId = null,
   onSettings,
   onCopy,
   onNotice,
 }: {
   data: ServerData;
+  /** The QA session recording in this tab, whose calls "My session" shows. */
+  sessionId?: string | null;
   onSettings: () => void;
   onCopy: (value: string) => void;
   onNotice: (message: string) => void;
 }): JSX.Element {
   const [mode, setMode] = useState<Mode>('calls');
+  // On a shared server, other testers' traffic is noise; default to this tester's own calls while recording.
+  const [scope, setScope] = useState<'mine' | 'everyone'>('mine');
+  const mineOnly = scope === 'mine' && sessionId !== null;
+  const scoped = useMemo(() => (mineOnly ? data.calls.filter((call) => call.sessionId === sessionId) : data.calls), [data.calls, mineOnly, sessionId]);
+  const hiddenByScope = data.calls.length - scoped.length;
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState<KindFilter>('all');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -132,7 +153,7 @@ export function ServerView({
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return data.calls.filter((call) => {
+    return scoped.filter((call) => {
       if (kind !== 'all' && call.kind !== kind) return false;
       if (statusFilter === 'errors' && call.status !== 'error') return false;
       if (statusFilter === 'mocked' && !call.mockedBy) return false;
@@ -142,7 +163,7 @@ export function ServerView({
         .toLowerCase()
         .includes(needle);
     });
-  }, [data.calls, query, kind, statusFilter]);
+  }, [scoped, query, kind, statusFilter]);
 
   // Grouped: each incoming route is followed by the upstream calls it made.
   const rows = useMemo<ServerFlowRow[]>(
@@ -153,13 +174,13 @@ export function ServerView({
   const multiService = useMemo(() => new Set(data.calls.map((call) => call.serviceName)).size > 1, [data.calls]);
 
   const stats = useMemo(() => {
-    const incoming = data.calls.filter((call) => call.kind === 'server').length;
-    const outgoing = data.calls.length - incoming;
-    const errors = data.calls.filter((call) => call.status === 'error').length;
-    const mocked = data.calls.filter((call) => call.mockedBy).length;
-    const slowest = data.calls.reduce((max, call) => Math.max(max, call.durationMs), 0);
+    const incoming = scoped.filter((call) => call.kind === 'server').length;
+    const outgoing = scoped.length - incoming;
+    const errors = scoped.filter((call) => call.status === 'error').length;
+    const mocked = scoped.filter((call) => call.mockedBy).length;
+    const slowest = scoped.reduce((max, call) => Math.max(max, call.durationMs), 0);
     return { incoming, outgoing, errors, mocked, slowest };
-  }, [data.calls]);
+  }, [scoped]);
 
   const columns: Array<VirtualTableColumn<ServerFlowRow>> = [
     {
@@ -240,7 +261,7 @@ export function ServerView({
 
       <div className="segmented" role="tablist" aria-label="Server workspace">
         <button role="tab" aria-selected={mode === 'calls'} className={mode === 'calls' ? 'active' : ''} onClick={() => setMode('calls')}>
-          Calls <b>{data.calls.length}</b>
+          Calls <b>{scoped.length}</b>
         </button>
         <button role="tab" aria-selected={mode === 'mocks'} className={mode === 'mocks' ? 'active' : ''} onClick={() => setMode('mocks')}>
           Server mocks <b>{data.rules.length}</b>
@@ -270,6 +291,12 @@ export function ServerView({
               <span className="sr-only">Filter server calls</span>
               <input className="input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter by path, status, service or payload text…" />
             </label>
+            {sessionId !== null ? (
+              <div className="segmented sm" role="group" aria-label="Whose calls">
+                <button className={scope === 'mine' ? 'active' : ''} onClick={() => setScope('mine')} title="Calls tagged with the QA session recording in this tab">My session</button>
+                <button className={scope === 'everyone' ? 'active' : ''} onClick={() => setScope('everyone')} title="Every tester and user on this server">Everyone</button>
+              </div>
+            ) : null}
             <div className="segmented sm" role="group" aria-label="Direction filter">
               {(['all', 'server', 'client'] as KindFilter[]).map((value) => (
                 <button key={value} className={kind === value ? 'active' : ''} onClick={() => setKind(value)}>
@@ -289,6 +316,15 @@ export function ServerView({
               ))}
             </div>
           </div>
+
+          {mineOnly && scoped.length === 0 && hiddenByScope > 0 ? (
+            <div className="banner info" role="status">
+              <div>
+                <strong>None of the {hiddenByScope} server calls are tagged with your session yet.</strong>
+                <span> Reload the page so its requests carry your session, check “Tag my traffic with my QA session” in Settings, or switch to Everyone.</span>
+              </div>
+            </div>
+          ) : null}
 
           <div className="split request-area">
             <div className="left">

@@ -42,6 +42,11 @@ export interface ServerControlSettings {
   pollIntervalMs: number;
   /** Keep polling while the panel is closed. Off by default to save quota. */
   pollInBackground: boolean;
+  /**
+   * While a QA session records, send `x-qa-session-id` on every request the
+   * tab makes to the app's host, so a shared server can tell testers apart.
+   */
+  tagSession: boolean;
 }
 
 export interface CaptureSettings {
@@ -91,6 +96,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     token: '',
     pollIntervalMs: 2_000,
     pollInBackground: false,
+    tagSession: true,
   },
   slowRequestMs: 1_000,
 };

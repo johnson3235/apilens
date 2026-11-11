@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MAX_RELAY_BATCH = exports.MIN_TOKEN_LENGTH = void 0;
 exports.isTokenAcceptable = isTokenAcceptable;
+exports.parseExpiry = parseExpiry;
+exports.controlMountPath = controlMountPath;
 exports.resolveOperation = resolveOperation;
 exports.createControlHandler = createControlHandler;
 exports.buildRulesRevision = buildRulesRevision;
@@ -44,6 +46,19 @@ exports.MAX_RELAY_BATCH = 50;
 function isTokenAcceptable(token) {
     return typeof token === 'string' && token.length >= exports.MIN_TOKEN_LENGTH;
 }
+/** Epoch milliseconds after which the control plane stops answering, or null for no expiry. */
+function parseExpiry(value) {
+    if (value === undefined || value === '')
+        return null;
+    const at = typeof value === 'number' ? value : Date.parse(value);
+    // An unreadable expiry fails closed: better a 404 than a token that never ends.
+    return Number.isFinite(at) ? at : 0;
+}
+/** Normalised control mount, e.g. `/api/__apilens`, without a trailing slash. */
+function controlMountPath(value) {
+    const path = (value ?? '/api/__apilens').trim();
+    return `/${path.replace(/^\/+|\/+$/g, '')}`;
+}
 /**
  * Resolves the operation from the request path.
  *
@@ -62,6 +77,7 @@ function createControlHandler(context) {
     let windowCount = 0;
     let authFailures = 0;
     let lockedUntil = 0;
+    const expiresAt = parseExpiry(context.options.expiresAt);
     function corsHeaders(request) {
         const base = {
             'cache-control': 'no-store, no-cache, must-revalidate',
@@ -90,7 +106,7 @@ function createControlHandler(context) {
         if (request.method === 'OPTIONS') {
             return new Response(null, { status: 204, headers: corsHeaders(request) });
         }
-        if (!context.options.enabled || !isTokenAcceptable(context.options.token)) {
+        if (!context.options.enabled || !isTokenAcceptable(context.options.token) || (expiresAt !== null && Date.now() >= expiresAt)) {
             // Indistinguishable from an unmounted route, so a disabled control plane
             // never advertises that ApiLens is installed.
             return reply(request, 404, { error: 'Not found' });

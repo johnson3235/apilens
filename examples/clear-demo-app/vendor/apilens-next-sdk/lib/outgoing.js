@@ -25,7 +25,23 @@ function setOutgoingHook(hook) {
     if (!state[HOOK]) {
         const modules = { http: node_http_1.default, https: node_https_1.default };
         const originals = { http: modules.http.request, https: modules.https.request };
-        state[HOOK] = { hook: null, originals };
+        const originalGets = { http: modules.http.get, https: modules.https.get };
+        const installed = {};
+        state[HOOK] = {
+            hook: null,
+            originals,
+            restore: () => {
+                for (const name of ['http', 'https']) {
+                    const mod = modules[name];
+                    // Only undo a patch that is still outermost; a later wrapper keeps working, inert.
+                    if (mod.request === installed[name]?.request)
+                        mod.request = originals[name];
+                    if (mod.get === installed[name]?.get)
+                        mod.get = originalGets[name];
+                }
+                (0, node_module_1.syncBuiltinESMExports)();
+            },
+        };
         for (const name of ['http', 'https']) {
             const mod = modules[name];
             const original = (...args) => originals[name].apply(mod, args);
@@ -48,15 +64,21 @@ function setOutgoingHook(hook) {
                 request.end();
                 return request;
             };
+            installed[name] = { request: mod.request, get: mod.get };
         }
         // ESM `import { request } from 'node:http'` bindings only follow this call.
         (0, node_module_1.syncBuiltinESMExports)();
     }
     state[HOOK].hook = hook;
 }
+/** Detaches `hook` and, when nothing has wrapped them since, restores Node's own client functions. */
 function clearOutgoingHook(hook) {
-    if (state[HOOK]?.hook === hook)
-        state[HOOK].hook = null;
+    const current = state[HOOK];
+    if (current?.hook !== hook)
+        return;
+    current.hook = null;
+    current.restore();
+    delete state[HOOK];
 }
 /** Reads `request(url?, options?, callback?)` the way Node does. */
 function describe(defaultProtocol, args) {
@@ -127,13 +149,13 @@ function realResponse(original, call, body, signal) {
             const chunks = [];
             res.on('data', (chunk) => chunks.push(chunk));
             res.once('error', reject);
-            res.once('end', () => {
+            res.once('end', async () => {
                 signal.removeEventListener('abort', abort);
                 const headers = (0, incoming_1.nodeHeaders)(res.headers);
                 let bytes = Buffer.concat(chunks);
                 const encoding = headers.get('content-encoding');
                 if (encoding) {
-                    const decoded = (0, incoming_1.decodeBody)(bytes, encoding, 8 * 1024 * 1024);
+                    const decoded = await (0, incoming_1.decodeBody)(bytes, encoding, 8 * 1024 * 1024);
                     if (decoded) {
                         bytes = decoded;
                         headers.delete('content-encoding');

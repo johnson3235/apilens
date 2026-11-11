@@ -8,6 +8,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.REDACTED = void 0;
+exports.isSensitiveKey = isSensitiveKey;
 exports.isSensitiveHeader = isSensitiveHeader;
 exports.redactHeaders = redactHeaders;
 exports.redactQuery = redactQuery;
@@ -16,11 +17,23 @@ exports.safeUrlParts = safeUrlParts;
 const SENSITIVE_HEADER = /authorization|cookie|token|secret|password|api[-_]?key|session|apilens|x-csrf|x-xsrf|proxy-authenticate|proxy-authorization|set-cookie/i;
 /** Keys whose values are replaced wholesale, regardless of their shape. */
 const SENSITIVE_KEY = /pass(word|wd|phrase)?|secret|token|credential|authorization|api[-_]?key|client[-_]?secret|private[-_]?key|cvv|cvc|card[-_]?number|pan\b|iban|sort[-_]?code|account[-_]?number|ssn|national[-_]?id|otp|pin\b|signature|refresh|bearer/i;
+/**
+ * Personal-data keys, matched on the whole key (case and `-`/`_` ignored) so
+ * that `mobile` is redacted but `mobilePlanName` is not.
+ */
+const PERSONAL_KEY = /^(?:msisdn|phone|phonenumber|phoneno|mobile|mobilenumber|mobileno|contactnumber|email|emailaddress|dob|dateofbirth|birthdate)$/;
+/** Personal-data keys matched anywhere in the key, because no harmless key contains them. */
+const PERSONAL_KEY_PART = /msisdn|e-?mail(?!ed|ing|able)/i;
+function isSensitiveKey(key) {
+    return SENSITIVE_KEY.test(key) || PERSONAL_KEY_PART.test(key) || PERSONAL_KEY.test(key.toLowerCase().replace(/[-_]/g, ''));
+}
 /** Value shapes that are sensitive wherever they appear. */
 const SENSITIVE_VALUE = [
     { pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, label: '[REDACTED_JWT]' },
     { pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi, label: '[REDACTED_BEARER]' },
+    { pattern: /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){3,7}(?: ?[A-Z0-9]{1,4})?\b/g, label: '[REDACTED_IBAN]' },
     { pattern: /\b(?:\d[ -]?){13,19}\b/g, label: '[REDACTED_PAN]' },
+    { pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}\b/g, label: '[REDACTED_EMAIL]' },
 ];
 exports.REDACTED = '[REDACTED]';
 const MAX_HEADER_VALUE = 2048;
@@ -38,7 +51,7 @@ function redactHeaders(headers) {
 function redactQuery(params) {
     const result = {};
     params.forEach((value, key) => {
-        result[key] = SENSITIVE_KEY.test(key) || isSensitiveHeader(key) ? exports.REDACTED : redactText(value).text;
+        result[key] = isSensitiveKey(key) || isSensitiveHeader(key) ? exports.REDACTED : redactText(value).text;
     });
     return result;
 }
@@ -70,7 +83,7 @@ function redactValue(value, extraKeys, depth, state) {
     if (value && typeof value === 'object') {
         const result = {};
         for (const [key, item] of Object.entries(value)) {
-            if (SENSITIVE_KEY.test(key) || (extraKeys && extraKeys.test(key))) {
+            if (isSensitiveKey(key) || (extraKeys && extraKeys.test(key))) {
                 result[key] = exports.REDACTED;
                 state.redacted = true;
                 continue;

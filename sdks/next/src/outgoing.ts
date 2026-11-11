@@ -31,7 +31,7 @@ export type OutgoingHook = (call: OutgoingCall, original: RequestFn) => ClientRe
 const HOOK = Symbol.for('apilens.next.outgoingHook');
 // On globalThis so dev/HMR re-evaluation of this module never patches twice.
 const state = globalThis as typeof globalThis & {
-  [HOOK]?: { hook: OutgoingHook | null; originals: { http: RequestFn; https: RequestFn } };
+  [HOOK]?: { hook: OutgoingHook | null; originals: { http: RequestFn; https: RequestFn }; restore: () => void };
 };
 
 /** The real `http.request`, for the SDK's own traffic, which must never be captured. */
@@ -43,7 +43,21 @@ export function setOutgoingHook(hook: OutgoingHook): void {
   if (!state[HOOK]) {
     const modules = { http, https } as unknown as Record<'http' | 'https', { request: RequestFn; get: RequestFn }>;
     const originals = { http: modules.http.request, https: modules.https.request };
-    state[HOOK] = { hook: null, originals };
+    const originalGets = { http: modules.http.get, https: modules.https.get };
+    const installed: Partial<Record<'http' | 'https', { request: RequestFn; get: RequestFn }>> = {};
+    state[HOOK] = {
+      hook: null,
+      originals,
+      restore: () => {
+        for (const name of ['http', 'https'] as const) {
+          const mod = modules[name];
+          // Only undo a patch that is still outermost; a later wrapper keeps working, inert.
+          if (mod.request === installed[name]?.request) mod.request = originals[name];
+          if (mod.get === installed[name]?.get) mod.get = originalGets[name];
+        }
+        syncBuiltinESMExports();
+      },
+    };
     for (const name of ['http', 'https'] as const) {
       const mod = modules[name];
       const original: RequestFn = (...args) => originals[name].apply(mod, args);
@@ -64,6 +78,7 @@ export function setOutgoingHook(hook: OutgoingHook): void {
         request.end();
         return request;
       };
+      installed[name] = { request: mod.request, get: mod.get };
     }
     // ESM `import { request } from 'node:http'` bindings only follow this call.
     syncBuiltinESMExports();
@@ -71,8 +86,13 @@ export function setOutgoingHook(hook: OutgoingHook): void {
   state[HOOK].hook = hook;
 }
 
+/** Detaches `hook` and, when nothing has wrapped them since, restores Node's own client functions. */
 export function clearOutgoingHook(hook: OutgoingHook): void {
-  if (state[HOOK]?.hook === hook) state[HOOK].hook = null;
+  const current = state[HOOK];
+  if (current?.hook !== hook) return;
+  current.hook = null;
+  current.restore();
+  delete state[HOOK];
 }
 
 /** Reads `request(url?, options?, callback?)` the way Node does. */
@@ -142,13 +162,13 @@ export function realResponse(original: RequestFn, call: OutgoingCall, body: Buff
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
       res.once('error', reject);
-      res.once('end', () => {
+      res.once('end', async () => {
         signal.removeEventListener('abort', abort);
         const headers = nodeHeaders(res.headers);
         let bytes = Buffer.concat(chunks);
         const encoding = headers.get('content-encoding');
         if (encoding) {
-          const decoded = decodeBody(bytes, encoding, 8 * 1024 * 1024);
+          const decoded = await decodeBody(bytes, encoding, 8 * 1024 * 1024);
           if (decoded) {
             bytes = decoded;
             headers.delete('content-encoding');

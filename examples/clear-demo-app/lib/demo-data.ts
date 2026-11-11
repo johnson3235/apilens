@@ -12,6 +12,11 @@ export const customer = {
 };
 
 /** Outstanding balance: the two unpaid bills below (2 × €40.00). */
+/** What the session service answers the Edge middleware with. */
+export function sessionFor(contactId: string) {
+  return { sessionId: `sess-${contactId}`, contactId, msisdn: '353871234567', segment: 'consumer', valid: true };
+}
+
 export function balanceFor(contactId: string) {
   return {
     accountId: `ACC-${contactId}`,

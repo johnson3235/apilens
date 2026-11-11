@@ -10,30 +10,47 @@ exports.tapWrites = tapWrites;
 exports.decodeBody = decodeBody;
 const node_http_1 = require("node:http");
 const node_https_1 = require("node:https");
+const node_util_1 = require("node:util");
 const node_zlib_1 = require("node:zlib");
+const gunzipAsync = (0, node_util_1.promisify)(node_zlib_1.gunzip);
+const inflateAsync = (0, node_util_1.promisify)(node_zlib_1.inflate);
+const brotliAsync = (0, node_util_1.promisify)(node_zlib_1.brotliDecompress);
 const HOOK = Symbol.for('apilens.next.requestHook');
 // On globalThis so dev/HMR re-evaluation of this module never patches twice.
 const state = globalThis;
 function setRequestHook(hook) {
     if (!state[HOOK]) {
-        state[HOOK] = { hook: null };
+        const restorers = [];
         for (const proto of [node_http_1.Server.prototype, node_https_1.Server.prototype]) {
             const original = proto.emit;
-            proto.emit = function apiLensEmit(event, ...args) {
+            const patched = function apiLensEmit(event, ...args) {
                 const dispatch = () => original.call(this, event, ...args);
                 const active = state[HOOK]?.hook;
                 if (event !== 'request' || !active)
                     return dispatch();
                 return active(args[0], args[1], dispatch);
             };
+            proto.emit = patched;
+            // Restoring over someone else's later patch would silently remove theirs,
+            // so the patch is only undone while it is still the outermost one.
+            restorers.push(() => { if (proto.emit === patched)
+                proto.emit = original; });
         }
+        state[HOOK] = { hook: null, restore: () => restorers.forEach((restore) => restore()) };
     }
     state[HOOK].hook = hook;
 }
-/** Detaches `hook` if it is still the active one; the patch itself stays inert. */
+/**
+ * Detaches `hook` if it is still the active one and puts `Server.emit` back.
+ * When another library has wrapped it since, the patch stays in place but inert.
+ */
 function clearRequestHook(hook) {
-    if (state[HOOK]?.hook === hook)
-        state[HOOK].hook = null;
+    const current = state[HOOK];
+    if (current?.hook !== hook)
+        return;
+    current.hook = null;
+    current.restore();
+    delete state[HOOK];
 }
 function nodeHeaders(raw) {
     const headers = new Headers();
@@ -153,8 +170,11 @@ function tapWrites(message, cap) {
 /**
  * Undoes transfer compression (`next start` gzips by default) on a possibly
  * truncated capture. Returns null when the encoding is unknown or corrupt.
+ *
+ * Runs on libuv's thread pool, so decompressing a captured body never blocks
+ * the event loop that serves the application.
  */
-function decodeBody(bytes, contentEncoding, cap) {
+async function decodeBody(bytes, contentEncoding, cap) {
     const encoding = (contentEncoding ?? '').trim().toLowerCase();
     if (!encoding || encoding === 'identity')
         return bytes;
@@ -162,11 +182,11 @@ function decodeBody(bytes, contentEncoding, cap) {
     const limits = { maxOutputLength: Math.max(cap * 4, 1 << 20) };
     try {
         if (encoding === 'gzip' || encoding === 'x-gzip')
-            return (0, node_zlib_1.gunzipSync)(bytes, { ...limits, finishFlush: node_zlib_1.constants.Z_SYNC_FLUSH });
+            return await gunzipAsync(bytes, { ...limits, finishFlush: node_zlib_1.constants.Z_SYNC_FLUSH });
         if (encoding === 'deflate')
-            return (0, node_zlib_1.inflateSync)(bytes, { ...limits, finishFlush: node_zlib_1.constants.Z_SYNC_FLUSH });
+            return await inflateAsync(bytes, { ...limits, finishFlush: node_zlib_1.constants.Z_SYNC_FLUSH });
         if (encoding === 'br')
-            return (0, node_zlib_1.brotliDecompressSync)(bytes, { ...limits, finishFlush: node_zlib_1.constants.BROTLI_OPERATION_FLUSH });
+            return await brotliAsync(bytes, { ...limits, finishFlush: node_zlib_1.constants.BROTLI_OPERATION_FLUSH });
     }
     catch {
         return null;

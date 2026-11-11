@@ -56,7 +56,9 @@ Columns drop by priority as the panel narrows, so a docked DevTools pane stays r
 
 The **Server API** view shows what the application does *after* the browser request ends: wrapped App Router handlers and the upstream calls they make, each with request payload, response payload, headers, timing and correlation IDs.
 
-It requires an application running [`@apilens/next-sdk`](../sdks/next/README.md) 0.3.0 with its control plane enabled. Configure the endpoint and token under **Settings → Instrumented server**, and use **Test connection** before saving — a wrong URL or token is the usual reason server capture appears to do nothing.
+It requires an application running [`@apilens/next-sdk`](../sdks/next/README.md) 0.3.0 or later with its control plane enabled (0.4.0 also reports Edge middleware calls, memory use and configuration issues). Configure the endpoint and token under **Settings → Instrumented server**, and use **Test connection** before saving — a wrong URL or token is the usual reason server capture appears to do nothing, and from SDK 0.4.0 the result also lists any setting the server switched off at boot.
+
+- **Shared servers.** While a QA session records, the extension tags every request the recording tab sends to the app's host (page loads, RSC, server actions and fetch) with `x-qa-session-id`, through a session-scoped `declarativeNetRequest` rule limited to that tab and that host. The view then defaults to **My session**, showing only this tester's calls; **Everyone** shows all traffic. The rule is removed when the session stops. Turn it off with *Tag my traffic with my QA session* in Settings.
 
 - Polling is driven by the panel, not the service worker, because an MV3 worker is evicted after about 30 seconds of inactivity. Requests are issued from the worker, which holds host permissions and is therefore not subject to page CORS.
 - Each poll uses a `seq` cursor, so only new calls cross the wire. A restarted server changes its process id and the view resets rather than showing stale data.

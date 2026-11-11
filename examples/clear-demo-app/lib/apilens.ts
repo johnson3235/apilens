@@ -2,14 +2,9 @@ import { ApiLensNextSDK } from '@apilens/next-sdk';
 
 // Server-only: import from route handlers and instrumentation, never from pages.
 
-const token = process.env.APILENS_CONTROL_TOKEN ?? '';
-const requested = process.env.APILENS_ENABLED === 'true';
-// The SDK refuses short tokens; stay off rather than crash the whole app.
-const enabled = requested && token.length >= 24;
-
-if (requested && !enabled) {
-  console.warn('[apilens] APILENS_ENABLED is true but APILENS_CONTROL_TOKEN is missing or shorter than 24 characters; the SDK stays off.');
-}
+// A missing or short token no longer stops the app: the SDK switches the
+// control plane off and reports why (`apiLens.diagnostics.configIssues`).
+const enabled = process.env.APILENS_ENABLED === 'true';
 
 // Vercel runs the billing page and the API route as separate functions with
 // separate memory. Relay lets the page function hand its captured calls to the
@@ -38,9 +33,11 @@ export const apiLens = (processState.__clearDemoApiLens ??= new ApiLensNextSDK({
     redactKeys: ['iban', 'cardNumber'],
   },
   control: {
-    enabled,
-    token,
+    enabled: true,
+    token: process.env.APILENS_CONTROL_TOKEN ?? '',
     bufferSize: 500,
+    // Keeps a pod's capture memory bounded on a busy dev server.
+    maxBufferBytes: 32 * 1024 * 1024,
     relay,
   },
   // Every request is captured automatically. The fake services stand in for
