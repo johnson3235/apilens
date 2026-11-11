@@ -29,6 +29,10 @@ export interface ControlContext {
 /** Most calls accepted in one relay request. */
 export declare const MAX_RELAY_BATCH = 50;
 export declare function isTokenAcceptable(token: string | undefined): boolean;
+/** Epoch milliseconds after which the control plane stops answering, or null for no expiry. */
+export declare function parseExpiry(value: string | number | undefined): number | null;
+/** Normalised control mount, e.g. `/api/__apilens`, without a trailing slash. */
+export declare function controlMountPath(value: string | undefined): string;
 /**
  * Resolves the operation from the request path.
  *

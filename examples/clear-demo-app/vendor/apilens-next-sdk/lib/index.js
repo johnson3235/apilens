@@ -15,6 +15,7 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ApiLensNextSDK = exports.AMBIENT_SESSION_ID = exports.SDK_VERSION = exports.MIN_TOKEN_LENGTH = exports.DEFAULT_TEXT_CONTENT_TYPES = void 0;
+exports.outgoingMatcher = outgoingMatcher;
 exports.safeHeaders = safeHeaders;
 const node_async_hooks_1 = require("node:async_hooks");
 const node_crypto_1 = require("node:crypto");
@@ -31,7 +32,7 @@ var bodies_2 = require("./bodies");
 Object.defineProperty(exports, "DEFAULT_TEXT_CONTENT_TYPES", { enumerable: true, get: function () { return bodies_2.DEFAULT_TEXT_CONTENT_TYPES; } });
 var control_2 = require("./control");
 Object.defineProperty(exports, "MIN_TOKEN_LENGTH", { enumerable: true, get: function () { return control_2.MIN_TOKEN_LENGTH; } });
-exports.SDK_VERSION = '0.3.0';
+exports.SDK_VERSION = '0.4.0';
 /**
  * Session id used when `captureWithoutSession` is on.
  *
@@ -47,6 +48,62 @@ function parseTraceparent(value) {
 }
 /** Next's assets, dev tooling and the SDK's own control endpoint are never QA traffic. */
 const ALWAYS_IGNORED = /^\/(?:_next\/|__nextjs|api\/(?:__|%5F_)apilens(?:\/|$)|favicon\.ico$)|\.(?:js|mjs|css|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|otf|txt|xml|webmanifest)$/i;
+/** Largest control-plane request body read by the request hook. */
+const MAX_CONTROL_BODY_BYTES = 1024 * 1024;
+/**
+ * Tracer and telemetry agents. Their background flushes inherit whichever
+ * request was in flight, so they would otherwise show up as that request's
+ * backend calls.
+ */
+const DEFAULT_IGNORED_OUTGOING = [':8126', ':4317', ':4318'];
+function telemetryAgentsFromEnv() {
+    const found = [];
+    const host = process.env.DD_AGENT_HOST;
+    if (host)
+        found.push(`${host}:${process.env.DD_TRACE_AGENT_PORT || '8126'}`);
+    if (process.env.DD_TRACE_AGENT_URL)
+        found.push(process.env.DD_TRACE_AGENT_URL);
+    if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT)
+        found.push(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
+    return found;
+}
+/**
+ * Builds the outgoing ignore test. A string with a scheme is a URL prefix,
+ * `:port` matches any host on that port, `host:port` the exact pair, and a
+ * bare host that host or its subdomains.
+ */
+function outgoingMatcher(rules) {
+    const tests = rules.flatMap((rule) => {
+        if (rule instanceof RegExp)
+            return [(_url, raw) => { rule.lastIndex = 0; return rule.test(raw); }];
+        const value = String(rule).trim().toLowerCase();
+        if (!value)
+            return [];
+        if (value.includes('://'))
+            return [(_url, raw) => raw.toLowerCase().startsWith(value)];
+        if (value.startsWith(':'))
+            return [(url) => effectivePort(url) === value.slice(1)];
+        if (value.includes(':') && !value.startsWith('[')) {
+            const [host, port] = [value.slice(0, value.lastIndexOf(':')), value.slice(value.lastIndexOf(':') + 1)];
+            return [(url) => url.hostname.toLowerCase() === host && effectivePort(url) === port];
+        }
+        return [(url) => url.hostname.toLowerCase() === value || url.hostname.toLowerCase().endsWith(`.${value}`)];
+    });
+    return (raw) => {
+        if (tests.length === 0)
+            return false;
+        try {
+            const url = new URL(raw);
+            return tests.some((test) => test(url, raw));
+        }
+        catch {
+            return false;
+        }
+    };
+}
+function effectivePort(url) {
+    return url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
+}
 /** Page markup and RSC payloads are not data a tester inspects. */
 const MARKUP_TYPES = /^(?:text\/html|text\/x-component)\b/i;
 const isNextPatched = (candidate) => candidate.__nextPatched === true;
@@ -176,33 +233,92 @@ class ApiLensNextSDK {
     auto;
     requestHook = null;
     outgoingHook = null;
+    /** The control settings actually in force, after validation. */
+    controlOptions;
+    controlPath;
+    isIgnoredOutgoing;
+    issues = [];
+    lateCallsSkipped = 0;
+    ignoredOutgoingCalls = 0;
     /** Distinguishes a restarted server from an idle one in the extension. */
     processId = id(8);
     startedAt = Date.now();
     constructor(options) {
         this.options = options;
+        // Configuration problems never stop the application from booting: the
+        // affected feature is switched off and the reason is reported through
+        // `diagnostics.configIssues` and the control plane's health instead.
+        const enabled = options.enabled === true;
+        const flag = (setting, problem) => { if (enabled)
+            this.issues.push({ setting, problem }); };
         // Defaults to on so an existing local setup keeps delivering spans; remote
         // deployments must opt out explicitly and use the control plane instead.
-        const reportToAgent = options.reportToAgent !== false;
-        if (options.enabled && reportToAgent && !options.agentToken) {
-            throw new Error('ApiLens agentToken is required when enabled. Set reportToAgent: false to use the control plane only.');
+        let reportToAgent = options.reportToAgent !== false;
+        if (reportToAgent && !options.agentToken) {
+            if (options.reportToAgent === true || !options.control?.enabled) {
+                flag('agentToken', 'Missing, so spans are not delivered to the local agent. Set reportToAgent: false to use the control plane only.');
+            }
+            reportToAgent = false;
         }
-        if (options.control?.enabled && !(0, control_1.isTokenAcceptable)(options.control.token)) {
-            throw new Error(`ApiLens control.token must be at least ${control_1.MIN_TOKEN_LENGTH} characters.`);
+        let control = options.control?.enabled ? options.control : null;
+        if (control && !(0, control_1.isTokenAcceptable)(control.token)) {
+            flag('control.token', `Missing or shorter than ${control_1.MIN_TOKEN_LENGTH} characters, so the control plane is off.`);
+            control = null;
         }
-        if (options.control?.enabled && options.control.token === options.agentToken) {
-            throw new Error('ApiLens control.token must differ from agentToken so a leaked control token cannot reach the agent.');
+        if (control && options.agentToken && control.token === options.agentToken) {
+            flag('control.token', 'Equal to agentToken, so the control plane is off. A leaked control token must not reach the agent.');
+            control = null;
         }
+        const expiry = control ? (0, control_1.parseExpiry)(control.expiresAt) : null;
+        if (control && expiry !== null && expiry <= Date.now()) {
+            flag('control.expiresAt', 'Already passed (or unreadable), so the control plane answers 404. Issue a new token and expiry.');
+        }
+        this.controlOptions = control;
+        this.controlPath = (0, control_1.controlMountPath)(control?.path);
         this.allowAnyOrigin = options.allowedAppOrigins.includes('*');
-        this.allowed = new Set(options.allowedAppOrigins.filter((origin) => origin !== '*').map((origin) => new URL(origin).origin));
-        this.propagate = new Set((options.propagateToOrigins ?? []).map((origin) => new URL(origin).origin));
+        const origins = new Set();
+        for (const origin of options.allowedAppOrigins) {
+            if (origin === '*')
+                continue;
+            try {
+                origins.add(new URL(origin).origin);
+            }
+            catch {
+                flag('allowedAppOrigins', `"${origin}" is not a URL origin and is ignored.`);
+            }
+        }
+        this.allowed = origins;
+        const propagate = new Set();
+        for (const origin of options.propagateToOrigins ?? []) {
+            try {
+                propagate.add(new URL(origin).origin);
+            }
+            catch {
+                flag('propagateToOrigins', `"${origin}" is not a URL origin and is ignored.`);
+            }
+        }
+        this.propagate = propagate;
         this.bodyCapture = (0, bodies_1.resolveBodyCapture)(options.captureBodies);
-        this.buffer = new buffer_1.CallBuffer(Math.max(50, Math.min(options.control?.bufferSize ?? 500, 5_000)));
-        this.reporter = new Reporter(options);
+        this.buffer = new buffer_1.CallBuffer(Math.max(50, Math.min(control?.bufferSize ?? 500, 5_000)), Math.max(1024 * 1024, Math.min(control?.maxBufferBytes ?? buffer_1.DEFAULT_MAX_BUFFER_BYTES, 512 * 1024 * 1024)));
+        let reporter;
+        try {
+            reporter = new Reporter({ ...options, reportToAgent });
+        }
+        catch (cause) {
+            flag('agentUrl', `${cause instanceof Error ? cause.message : 'Invalid agent URL'} Agent delivery is off.`);
+            reporter = new Reporter({ ...options, reportToAgent: false });
+        }
+        this.reporter = reporter;
         this.auto = options.autoInstrument === false ? null : options.autoInstrument === true || !options.autoInstrument ? {} : options.autoInstrument;
-        this.control = options.control?.enabled
+        this.isIgnoredOutgoing = outgoingMatcher([
+            ...DEFAULT_IGNORED_OUTGOING,
+            ...telemetryAgentsFromEnv(),
+            ...(options.ignoreOutgoing ?? []),
+            ...(this.auto?.ignoreOutgoing ?? []),
+        ]);
+        this.control = control
             ? (0, control_1.createControlHandler)({
-                options: options.control,
+                options: control,
                 processId: this.processId,
                 buffer: this.buffer,
                 health: () => this.health(),
@@ -218,8 +334,21 @@ class ApiLensNextSDK {
                 },
             })
             : null;
+        if (this.issues.length) {
+            // Names the setting and the problem only; never a token or its length.
+            console.warn(`[apilens] ${this.issues.map((issue) => `${issue.setting}: ${issue.problem}`).join(' | ')}`);
+        }
     }
-    get diagnostics() { return { ...this.reporter.diagnostics, relayFailures: this.relayFailures, lastRelayError: this.lastRelayError }; }
+    get diagnostics() {
+        return {
+            ...this.reporter.diagnostics,
+            relayFailures: this.relayFailures,
+            lastRelayError: this.lastRelayError,
+            configIssues: [...this.issues],
+            lateCallsSkipped: this.lateCallsSkipped,
+            ignoredOutgoingCalls: this.ignoredOutgoingCalls,
+        };
+    }
     get enabled() { return this.options.enabled === true && !this.stopped; }
     /** True when the extension can reach this process over the control plane. */
     get controlEnabled() { return this.control !== null && this.enabled; }
@@ -235,11 +364,14 @@ class ApiLensNextSDK {
             captureRequestBodies: this.bodyCapture.request,
             captureResponseBodies: this.bodyCapture.response,
             maxBodyBytes: this.bodyCapture.maxBytes,
-            mockingEnabled: this.options.control?.allowMockControl !== false,
+            mockingEnabled: this.controlOptions?.allowMockControl !== false,
             routeMocksEnabled: this.options.allowRouteMocks === true,
             bufferedCalls: this.buffer.size(),
             latestSeq: this.buffer.latestSeq(),
             droppedCalls: this.buffer.droppedCount(),
+            bufferedBytes: this.buffer.byteSize(),
+            maxBufferBytes: this.buffer.byteLimit(),
+            configIssues: [...this.issues],
             ruleCount: this.rules.length,
             activeRuleCount: this.rules.filter((rule) => rule.enabled).length,
             agentDelivery: { ...this.reporter.diagnostics },
@@ -283,6 +415,51 @@ class ApiLensNextSDK {
         const handle = (request) => this.handleControlRequest(request);
         return { GET: handle, POST: handle, PUT: handle, DELETE: handle, OPTIONS: handle };
     }
+    isControlPath(pathname) {
+        const mount = this.controlPath;
+        if (pathname === mount || pathname.startsWith(`${mount}/`))
+            return true;
+        // The App Router folder for the default mount is `%5F_apilens`; accept either spelling.
+        return mount === '/api/__apilens' && /^\/api\/%5F_apilens(?:\/|$)/i.test(pathname);
+    }
+    /**
+     * Answers the control plane straight from the request hook, before Next
+     * routes the request, so the application needs no control route file.
+     */
+    async serveControl(req, res) {
+        try {
+            const headers = (0, incoming_1.nodeHeaders)(req.headers);
+            const method = (req.method ?? 'GET').toUpperCase();
+            let body;
+            if (method !== 'GET' && method !== 'HEAD') {
+                const chunks = [];
+                let size = 0;
+                for await (const chunk of req) {
+                    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+                    size += bytes.byteLength;
+                    if (size > MAX_CONTROL_BODY_BYTES) {
+                        res.writeHead(413, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+                        res.end(JSON.stringify({ error: 'Control request body too large.' }));
+                        return;
+                    }
+                    chunks.push(bytes);
+                }
+                body = Buffer.concat(chunks);
+            }
+            const response = await this.handleControlRequest(new Request(renderUrl(req.url ?? '/', headers), { method, headers, body }));
+            const outgoing = {};
+            response.headers.forEach((value, name) => { outgoing[name] = value; });
+            const payload = Buffer.from(await response.arrayBuffer());
+            outgoing['content-length'] = String(payload.byteLength);
+            res.writeHead(response.status, outgoing);
+            res.end(method === 'HEAD' ? undefined : payload);
+        }
+        catch {
+            if (!res.headersSent)
+                res.writeHead(500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(JSON.stringify({ error: 'Control request failed.' }));
+        }
+    }
     /**
      * Turns capture on for the whole server. Call once from `register()` in
      * instrumentation.ts; no page, layout or route file needs to change.
@@ -294,7 +471,7 @@ class ApiLensNextSDK {
     installFetch() {
         if (!this.enabled)
             return;
-        if (this.auto && !this.requestHook) {
+        if ((this.auto || (this.control && !this.controlOptions?.relay)) && !this.requestHook) {
             this.requestHook = (req, res, dispatch) => this.onIncoming(req, res, dispatch);
             (0, incoming_1.setRequestHook)(this.requestHook);
         }
@@ -313,12 +490,44 @@ class ApiLensNextSDK {
             const ctx = sdk.contexts.getStore();
             if (!sdk.enabled || !ctx || sdk.insideFetch.getStore())
                 return downstream(input, init);
+            if (sdk.skipOutgoing(ctx, fetchUrl(input)))
+                return downstream(input, init);
             return sdk.insideFetch.run(true, () => sdk.instrumentedFetch(downstream, ctx, input, init));
         };
         globalThis.fetch = this.wrapper;
     }
+    /**
+     * True for calls that are passed through untouched: tracer and agent
+     * traffic, configured ignores, and background work that only inherited the
+     * context of a request whose response has already been sent.
+     */
+    skipOutgoing(ctx, url) {
+        if (this.isIgnoredOutgoing(url)) {
+            this.ignoredOutgoingCalls += 1;
+            return true;
+        }
+        if (ctx.lifecycle?.finished && !this.auto?.recordAfterResponse) {
+            this.lateCallsSkipped += 1;
+            return true;
+        }
+        return false;
+    }
     /** Opens a capture context around one incoming request; never lets a failure reach the app. */
     onIncoming(req, res, dispatch) {
+        // Relay mode (serverless) keeps the route file as the one store the extension polls.
+        if (this.control && this.enabled && !this.controlOptions?.relay) {
+            let pathname = '/';
+            try {
+                pathname = (req.url ?? '/').split('?')[0];
+            }
+            catch { /* treat as root */ }
+            if (this.isControlPath(pathname)) {
+                void this.serveControl(req, res);
+                return true;
+            }
+        }
+        if (!this.auto)
+            return dispatch();
         let ctx = null;
         try {
             ctx = this.enabled ? this.autoContext(req) : null;
@@ -340,7 +549,7 @@ class ApiLensNextSDK {
     autoContext(req) {
         const rawPath = req.url ?? '/';
         const pathname = rawPath.split('?')[0];
-        if (ALWAYS_IGNORED.test(pathname) || this.auto?.ignorePaths?.some((rule) => typeof rule === 'string' ? pathname.startsWith(rule) : rule.test(pathname)))
+        if (ALWAYS_IGNORED.test(pathname) || this.isControlPath(pathname) || this.auto?.ignorePaths?.some((rule) => typeof rule === 'string' ? pathname.startsWith(rule) : rule.test(pathname)))
             return null;
         const headers = (0, incoming_1.nodeHeaders)(req.headers);
         const sessionId = safeId(headers.get('x-qa-session-id')) ?? (this.options.captureWithoutSession ? exports.AMBIENT_SESSION_ID : undefined);
@@ -360,6 +569,7 @@ class ApiLensNextSDK {
             spanId: id(8),
             relayTo: this.relayTarget(url),
             auto: { method: (req.method ?? 'GET').toUpperCase(), url, headers, parentSpanId: parent?.spanId ?? null, outbound: 0, claimed: false },
+            lifecycle: { finished: false },
         };
     }
     /** Records the request once the response is done, off the request's critical path. */
@@ -375,6 +585,8 @@ class ApiLensNextSDK {
             if (settled)
                 return;
             settled = true;
+            if (ctx.lifecycle)
+                ctx.lifecycle.finished = true;
             const statusCode = aborted && !res.headersSent ? null : res.statusCode;
             if (auto.claimed || !this.worthRecording(auto, statusCode, aborted))
                 return;
@@ -383,8 +595,8 @@ class ApiLensNextSDK {
                 ctx, spanId: ctx.spanId, parentSpanId: auto.parentSpanId, kind: 'server', method: auto.method, url: auto.url, startedAt,
                 statusCode, requestHeaders: auto.headers, responseHeaders,
                 error: aborted ? 'ClientAborted' : null,
-                requestCapture: requestTap ? Promise.resolve(this.tapped(requestTap, auto.headers)) : null,
-                responseCapture: responseTap ? Promise.resolve(this.tapped(responseTap, responseHeaders)) : null,
+                requestCapture: requestTap ? this.tapped(requestTap, auto.headers) : null,
+                responseCapture: responseTap ? this.tapped(responseTap, responseHeaders) : null,
                 mockedBy: null, skipped: [],
             }));
         };
@@ -414,6 +626,8 @@ class ApiLensNextSDK {
         const ctx = this.contexts.getStore();
         // insideFetch: a fetch polyfill built on http.request is already being captured.
         if (!this.enabled || !ctx || this.insideFetch.getStore())
+            return original(...call.args);
+        if (this.skipOutgoing(ctx, call.url))
             return original(...call.args);
         const spanId = id(8);
         const startedAt = Date.now();
@@ -469,8 +683,8 @@ class ApiLensNextSDK {
             this.track(this.finishRecord({
                 ctx, spanId, parentSpanId: ctx.spanId, kind: 'client', method: call.method, url: call.url, startedAt,
                 statusCode: response?.statusCode ?? null, requestHeaders, responseHeaders, error,
-                requestCapture: requestTap ? Promise.resolve(this.tapped(requestTap, requestHeaders, false)) : null,
-                responseCapture: responseTap && responseHeaders ? Promise.resolve(this.tapped(responseTap, responseHeaders, false)) : null,
+                requestCapture: requestTap ? this.tapped(requestTap, requestHeaders, false) : null,
+                responseCapture: responseTap && responseHeaders ? this.tapped(responseTap, responseHeaders, false) : null,
                 mockedBy: null, skipped,
             }));
         };
@@ -542,14 +756,14 @@ class ApiLensNextSDK {
         });
         return request;
     }
-    tapped(tap, headers, skipMarkup = true) {
+    async tapped(tap, headers, skipMarkup = true) {
         if (tap.size === 0)
             return { body: null, omitted: tap.truncated ? 'Body capture cap is 0 bytes' : null };
         const contentType = headers.get('content-type');
         if (skipMarkup && contentType && MARKUP_TYPES.test(contentType))
             return { body: null, omitted: 'Not captured: page markup' };
         const encoding = headers.get('content-encoding');
-        const decoded = (0, incoming_1.decodeBody)(tap.bytes(), encoding, this.bodyCapture.maxBytes);
+        const decoded = await (0, incoming_1.decodeBody)(tap.bytes(), encoding, this.bodyCapture.maxBytes);
         if (!decoded)
             return { body: null, omitted: `Not captured: ${encoding} body could not be decoded` };
         const truncated = tap.truncated || decoded.byteLength > this.bodyCapture.maxBytes;
@@ -633,7 +847,7 @@ class ApiLensNextSDK {
             const relayTo = this.relayTarget(request.url);
             if (relayTo)
                 await this.pullRules(relayTo);
-            const ctx = { sessionId, scenarioId: safeId(request.headers.get('x-test-scenario-id')), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo };
+            const ctx = { sessionId, scenarioId: safeId(request.headers.get('x-test-scenario-id')), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo, lifecycle: outer?.lifecycle };
             const startedAt = Date.now();
             const method = request.method.toUpperCase();
             return this.contexts.run(ctx, async () => {
@@ -706,7 +920,7 @@ class ApiLensNextSDK {
         const relayTo = this.relayTarget(url);
         if (relayTo)
             await this.pullRules(relayTo);
-        const ctx = { sessionId, scenarioId: safeId(incoming?.get('x-test-scenario-id') ?? null), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo };
+        const ctx = { sessionId, scenarioId: safeId(incoming?.get('x-test-scenario-id') ?? null), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo, lifecycle: outer?.lifecycle };
         const method = (options.method ?? 'GET').toUpperCase();
         const startedAt = Date.now();
         return this.contexts.run(ctx, async () => {
@@ -962,7 +1176,7 @@ class ApiLensNextSDK {
      * functions forward to it.
      */
     relayTarget(requestUrl) {
-        const relay = this.options.control?.enabled ? this.options.control.relay : undefined;
+        const relay = this.controlOptions?.relay;
         if (!relay || this.servedControl)
             return null;
         if (relay.url)
@@ -975,7 +1189,7 @@ class ApiLensNextSDK {
         }
     }
     async relayRequest(base, operation, init) {
-        const relay = this.options.control?.relay;
+        const relay = this.controlOptions?.relay;
         try {
             // insideFetch keeps the SDK's own traffic out of the capture.
             const response = await this.insideFetch.run(true, () => fetch(`${base}/${operation}`, {
@@ -984,7 +1198,7 @@ class ApiLensNextSDK {
                 signal: AbortSignal.timeout(relay?.timeoutMs ?? 3_000),
                 headers: {
                     ...(relay?.headers ?? {}),
-                    authorization: `Bearer ${this.options.control?.token ?? ''}`,
+                    authorization: `Bearer ${this.controlOptions?.token ?? ''}`,
                     'content-type': 'application/json',
                 },
             }));
@@ -1102,6 +1316,15 @@ function renderUrl(path, headers) {
     }
     catch {
         return `http://localhost${pathPart}`;
+    }
+}
+/** The URL a fetch call targets, for ignore matching only. */
+function fetchUrl(input) {
+    try {
+        return input instanceof Request ? input.url : String(input);
+    }
+    catch {
+        return '';
     }
 }
 /** A short, non-sensitive label for a failure: the system error code when there is one. */

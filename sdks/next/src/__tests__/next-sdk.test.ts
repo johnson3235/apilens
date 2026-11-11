@@ -87,7 +87,9 @@ describe('App Router SDK → real authenticated agent', () => {
     sdk = new ApiLensNextSDK({ serviceName: 'off', allowedAppOrigins: [origin] });
     sdk.installFetch();
     expect(globalThis.fetch).toBe(originalFetch);
-    expect(() => new ApiLensNextSDK({ serviceName: 'on', enabled: true, allowedAppOrigins: [origin] })).toThrow('agentToken');
+    // A missing secret must never stop the app from booting: agent delivery is switched off and reported instead.
+    const missing = new ApiLensNextSDK({ serviceName: 'on', enabled: true, allowedAppOrigins: [origin] });
+    expect(missing.diagnostics.configIssues.map((issue) => issue.setting)).toContain('agentToken');
   });
 
   it('records aborted fetch without replacing its error or blocking the app', async () => {

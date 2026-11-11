@@ -11,7 +11,10 @@ import { type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeader
  */
 export type RequestHook = (req: IncomingMessage, res: ServerResponse, dispatch: () => boolean) => boolean;
 export declare function setRequestHook(hook: RequestHook): void;
-/** Detaches `hook` if it is still the active one; the patch itself stays inert. */
+/**
+ * Detaches `hook` if it is still the active one and puts `Server.emit` back.
+ * When another library has wrapped it since, the patch stays in place but inert.
+ */
 export declare function clearRequestHook(hook: RequestHook): void;
 export declare function nodeHeaders(raw: IncomingHttpHeaders | OutgoingHttpHeaders): Headers;
 /**
@@ -41,6 +44,9 @@ export declare function tapWrites(message: OutgoingMessage, cap: number): BodyTa
 /**
  * Undoes transfer compression (`next start` gzips by default) on a possibly
  * truncated capture. Returns null when the encoding is unknown or corrupt.
+ *
+ * Runs on libuv's thread pool, so decompressing a captured body never blocks
+ * the event loop that serves the application.
  */
-export declare function decodeBody(bytes: Buffer, contentEncoding: string | null, cap: number): Buffer | null;
+export declare function decodeBody(bytes: Buffer, contentEncoding: string | null, cap: number): Promise<Buffer | null>;
 //# sourceMappingURL=incoming.d.ts.map

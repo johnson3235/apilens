@@ -11,6 +11,8 @@ ApiLens is a local-first QA platform combining browser API inspection, controlle
 | SSR/BFF/Node outgoing calls | Reported by explicit SDK/trace instrumentation |
 | SSR/BFF **payloads and responses** | Captured by `@apilens/next-sdk` when `captureBodies` is enabled |
 | Remote dev server internals | Read through the SDK's authenticated in-app control plane |
+| Next.js Edge middleware calls | Reported by `@apilens/next-sdk/edge` (`withApiLens`) to the control plane |
+| One tester's calls on a shared server | Extension tags the recording tab's requests with `x-qa-session-id`; **Server API → My session** |
 | Controlled server-to-server calls | Routed through the local QA proxy, or short-circuited by server mock rules |
 | Uninstrumented remote backend calls | **Not visible** |
 
@@ -59,7 +61,7 @@ The agent binds to loopback and requires its generated token.
 
 - `apps/browser-extension` — MV3 popup, DevTools, capture, browser mocking and the Server API workspace.
 - `apps/agent` — localhost WebSocket/HTTP agent, replay, evidence and controlled proxy.
-- `sdks/next` — App Router tracing, payload capture, server mocking and the in-app control plane.
+- `sdks/next` — App Router and Edge-middleware capture, payload capture, server mocking and the in-app control plane.
 - `sdks/node` — Express middleware and outgoing Node HTTP tracing.
 - `packages/*` — tracing, mocking, replay, security, evidence, insights, contracts and diff engines.
 - `examples/*` — local demonstration applications.

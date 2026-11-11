@@ -33,6 +33,7 @@ import { AgentClient } from './agent-client';
 import { ChromiumNetworkMock } from './network-mock';
 import { RecentRequestBuffer } from './recent-request-buffer';
 import { ServerBridge } from './server-bridge';
+import { syncSessionTag } from './server-session-tag';
 
 const RULES_KEY = 'apilens.rules.v1';
 const BOOKMARKS_KEY = 'apilens.bookmarks.v1';
@@ -99,6 +100,11 @@ const initialization = Promise.all([loadSettings(), loadRules(), store.restore()
   tracingTabId = session?.status === 'recording' && typeof restoredTrace['apilens-tracing-tab'] === 'number' ? restoredTrace['apilens-tracing-tab'] : null;
   if (settings.agent.enabled) agent.connect(settings.agent, session?.id ?? null);
   serverBridge.configure(settings.serverControl);
+  // Session rules outlive a service-worker restart but not the browser; re-assert either way.
+  await syncSessionTag(extensionApi, {
+    settings: settings.serverControl, sessionId: session?.id ?? null, recording: session?.status === 'recording',
+    tabId: tracingTabId, startUrl: session?.startUrl ?? null,
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -306,6 +312,15 @@ function traceSettingsFor(tabId: number | null) {
   };
 }
 async function syncTraceSettings(): Promise<void> {
+  const session = store.currentSession();
+  const tagError = await syncSessionTag(extensionApi, {
+    settings: settings.serverControl,
+    sessionId: session?.id ?? null,
+    recording: store.isRecording(),
+    tabId: tracingTabId,
+    startUrl: session?.startUrl ?? null,
+  });
+  if (tagError) console.warn(`[apilens] Could not tag this tab's requests with the QA session: ${tagError}`);
   const tabs = new Set(frameStatus.keys());
   if (tracingTabId !== null) tabs.add(tracingTabId);
   await Promise.all([...tabs].map((tabId) => pushRulesToTab(tabId)));
@@ -505,8 +520,8 @@ async function handlePanelRequest(message: PanelRequest, senderTabId: number | n
 
     case 'session:stop': {
       const session = await store.stopSession();
-      await syncTraceSettings();
       tracingTabId = null;
+      await syncTraceSettings();
       await extensionApi.storage.session.remove('apilens-tracing-tab');
       if (session) agent.stopSession(session.id);
       await store.enforceRetention(settings.retention);

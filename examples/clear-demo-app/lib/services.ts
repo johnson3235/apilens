@@ -1,4 +1,4 @@
-import { balanceFor, invoicesFor, nextBillFor } from './demo-data';
+import { balanceFor, invoicesFor, nextBillFor, sessionFor } from './demo-data';
 
 /**
  * The fake backend services the BFF calls server-side.
@@ -11,6 +11,7 @@ import { balanceFor, invoicesFor, nextBillFor } from './demo-data';
  *   GET /api/services/balance/:contactId    outstanding balance (amount due)
  *   GET /api/services/billing/:contactId    next bill
  *   GET /api/services/invoices/:contactId   bill history
+ *   GET /api/services/session/:contactId    session lookup (called by the Edge middleware)
  *
  * Paths are kept short so they read in full in the ApiLens panel.
  */
@@ -19,6 +20,7 @@ const SERVICES: Record<string, { latencyMs: number; build: (contactId: string) =
   balance: { latencyMs: 180, build: balanceFor },
   billing: { latencyMs: 240, build: nextBillFor },
   invoices: { latencyMs: 320, build: invoicesFor },
+  session: { latencyMs: 60, build: sessionFor },
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

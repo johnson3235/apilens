@@ -1,11 +1,24 @@
 {
   "name": "@apilens/next-sdk",
-  "version": "0.3.0",
-  "description": "Opt-in Node-runtime App Router tracing, payload capture and server mocking for ApiLens",
+  "version": "0.4.0",
+  "description": "Opt-in Node-runtime and Edge-middleware capture, payload inspection and server mocking for ApiLens",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./edge": {
+      "types": "./dist/edge.d.ts",
+      "default": "./dist/edge.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
+    "edge.js",
+    "edge.d.ts",
     "README.md"
   ],
   "engines": {

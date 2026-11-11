@@ -13,11 +13,25 @@ const SENSITIVE_HEADER =
 const SENSITIVE_KEY =
   /pass(word|wd|phrase)?|secret|token|credential|authorization|api[-_]?key|client[-_]?secret|private[-_]?key|cvv|cvc|card[-_]?number|pan\b|iban|sort[-_]?code|account[-_]?number|ssn|national[-_]?id|otp|pin\b|signature|refresh|bearer/i;
 
+/**
+ * Personal-data keys, matched on the whole key (case and `-`/`_` ignored) so
+ * that `mobile` is redacted but `mobilePlanName` is not.
+ */
+const PERSONAL_KEY = /^(?:msisdn|phone|phonenumber|phoneno|mobile|mobilenumber|mobileno|contactnumber|email|emailaddress|dob|dateofbirth|birthdate)$/;
+/** Personal-data keys matched anywhere in the key, because no harmless key contains them. */
+const PERSONAL_KEY_PART = /msisdn|e-?mail(?!ed|ing|able)/i;
+
+export function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY.test(key) || PERSONAL_KEY_PART.test(key) || PERSONAL_KEY.test(key.toLowerCase().replace(/[-_]/g, ''));
+}
+
 /** Value shapes that are sensitive wherever they appear. */
 const SENSITIVE_VALUE: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, label: '[REDACTED_JWT]' },
   { pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi, label: '[REDACTED_BEARER]' },
+  { pattern: /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){3,7}(?: ?[A-Z0-9]{1,4})?\b/g, label: '[REDACTED_IBAN]' },
   { pattern: /\b(?:\d[ -]?){13,19}\b/g, label: '[REDACTED_PAN]' },
+  { pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}\b/g, label: '[REDACTED_EMAIL]' },
 ];
 
 export const REDACTED = '[REDACTED]';
@@ -40,7 +54,7 @@ export function redactHeaders(headers: Headers | Record<string, string> | null):
 export function redactQuery(params: URLSearchParams): Record<string, string> {
   const result: Record<string, string> = {};
   params.forEach((value, key) => {
-    result[key] = SENSITIVE_KEY.test(key) || isSensitiveHeader(key) ? REDACTED : redactText(value).text;
+    result[key] = isSensitiveKey(key) || isSensitiveHeader(key) ? REDACTED : redactText(value).text;
   });
   return result;
 }
@@ -75,7 +89,7 @@ function redactValue(value: unknown, extraKeys: RegExp | null, depth: number, st
   if (value && typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      if (SENSITIVE_KEY.test(key) || (extraKeys && extraKeys.test(key))) {
+      if (isSensitiveKey(key) || (extraKeys && extraKeys.test(key))) {
         result[key] = REDACTED;
         state.redacted = true;
         continue;

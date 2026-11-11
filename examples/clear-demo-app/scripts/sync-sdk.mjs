@@ -24,6 +24,14 @@ writeFileSync(join(target, 'package.json'), `${JSON.stringify({
   description: `${source.description} (vendored copy for the CLEAR demo app)`,
   main: 'lib/index.js',
   types: 'lib/index.d.ts',
+  exports: {
+    '.': { types: './lib/index.d.ts', default: './lib/index.js' },
+    './edge': { types: './lib/edge.d.ts', default: './lib/edge.js' },
+    './package.json': './package.json',
+  },
   engines: source.engines,
 }, null, 2)}\n`);
+// `@apilens/next-sdk/edge` for resolvers that ignore "exports".
+writeFileSync(join(target, 'edge.js'), "module.exports = require('./lib/edge.js');\n");
+writeFileSync(join(target, 'edge.d.ts'), "export * from './lib/edge';\n");
 console.log(`Vendored ${source.name}@${source.version} into ${target}`);

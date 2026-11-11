@@ -339,18 +339,36 @@ describe('control plane', () => {
     expect((await disabled.handleControlRequest(new Request(`${origin}/api/__apilens/health`))).status).toBe(404);
   });
 
-  it('rejects a control token that is too weak or reuses the agent token', () => {
-    expect(() => new ApiLensNextSDK({ serviceName: 's', enabled: true, reportToAgent: false, allowedAppOrigins: [origin], control: { enabled: true, token: 'short' } })).toThrow('at least 24');
-    expect(
-      () =>
-        new ApiLensNextSDK({
-          serviceName: 's',
-          enabled: true,
-          agentToken: controlToken,
-          allowedAppOrigins: [origin],
-          control: { enabled: true, token: controlToken },
-        }),
-    ).toThrow('must differ from agentToken');
+  it('switches the control plane off, without throwing, for a weak or reused token', async () => {
+    const weak = new ApiLensNextSDK({ serviceName: 's', enabled: true, reportToAgent: false, allowedAppOrigins: [origin], control: { enabled: true, token: 'short' } });
+    expect(weak.controlEnabled).toBe(false);
+    expect(weak.diagnostics.configIssues).toEqual([expect.objectContaining({ setting: 'control.token' })]);
+    expect((await weak.handleControlRequest(new Request(`${origin}/api/__apilens/health`))).status).toBe(404);
+
+    const reused = new ApiLensNextSDK({
+      serviceName: 's', enabled: true, agentToken: controlToken, allowedAppOrigins: [origin],
+      control: { enabled: true, token: controlToken },
+    });
+    expect(reused.controlEnabled).toBe(false);
+    expect(reused.diagnostics.configIssues[0]?.problem).toContain('agentToken');
+    // No secret material in what is reported.
+    expect(JSON.stringify(reused.diagnostics)).not.toContain(controlToken);
+  });
+
+  it('never throws or reports anything while disabled, even with no secrets at all', () => {
+    const off = new ApiLensNextSDK({ serviceName: 's', enabled: false, allowedAppOrigins: [origin], control: { enabled: true, token: '' } });
+    expect(off.enabled).toBe(false);
+    expect(off.diagnostics.configIssues).toEqual([]);
+  });
+
+  it('stops answering once control.expiresAt has passed', async () => {
+    const expired = create({ control: { enabled: true, token: controlToken, expiresAt: Date.now() - 1 } });
+    expect((await control(expired, 'health')).status).toBe(404);
+    expect(expired.diagnostics.configIssues[0]?.setting).toBe('control.expiresAt');
+    const garbled = create({ control: { enabled: true, token: controlToken, expiresAt: 'next tuesday' } });
+    expect((await control(garbled, 'health')).status).toBe(404);
+    const future = create({ control: { enabled: true, token: controlToken, expiresAt: new Date(Date.now() + 60_000).toISOString() } });
+    expect((await control(future, 'health')).status).toBe(200);
   });
 
   it('reports health and serves calls incrementally by cursor', async () => {

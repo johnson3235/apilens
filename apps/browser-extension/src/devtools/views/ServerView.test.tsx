@@ -92,6 +92,29 @@ describe('ServerView', () => {
     expect(html).toContain('Connected');
   });
 
+  it('shows only this tester\'s session while recording, and explains an empty filter', () => {
+    const other: ServerCall = { ...call, spanId: 'span-2', seq: 2, sessionId: 'apilens-ambient', path: '/v2/other-tester', url: 'https://upstream.example.com/v2/other-tester' };
+    const mine = renderToStaticMarkup(<ServerView data={data({ calls: [call, other] })} sessionId="qa-1" onSettings={noop} onCopy={noop} onNotice={noop} />);
+    expect(mine).toContain('My session');
+    expect(mine).toContain('/v2/billing');
+    expect(mine).not.toContain('/v2/other-tester');
+
+    const untagged = renderToStaticMarkup(<ServerView data={data({ calls: [other] })} sessionId="qa-9" onSettings={noop} onCopy={noop} onNotice={noop} />);
+    expect(untagged).toContain('None of the 1 server calls are tagged with your session yet');
+
+    const notRecording = renderToStaticMarkup(<ServerView data={data({ calls: [call, other] })} onSettings={noop} onCopy={noop} onNotice={noop} />);
+    expect(notRecording).not.toContain('My session');
+    expect(notRecording).toContain('/v2/other-tester');
+  });
+
+  it('surfaces SDK configuration issues and memory use from health', () => {
+    const health = { ...status.health!, sdkVersion: '0.4.0', bufferedBytes: 30 * 1024 * 1024, maxBufferBytes: 32 * 1024 * 1024,
+      configIssues: [{ setting: 'agentToken', problem: 'Missing, so spans are not delivered to the local agent.' }] };
+    const html = renderToStaticMarkup(<ServerView data={data({ status: { ...status, health } })} onSettings={noop} onCopy={noop} onNotice={noop} />);
+    expect(html).toContain('Server memory');
+    expect(html).toContain('agentToken');
+  });
+
   it('tells the tester what to do when no server is configured', () => {
     const html = renderToStaticMarkup(
       <ServerView data={data({ status: { ...status, configured: false, connected: false, health: null } })} onSettings={noop} onCopy={noop} onNotice={noop} />,

@@ -1,131 +1,125 @@
 # Claude prompt: integrate ApiLens into CLEAR-APP
 
-Copy the complete block below into Claude while working with the CLEAR-APP source checkout. Give Claude access to the updated ApiLens checkout or its built SDK tarball too.
+Copy the complete block below into Claude while working with the CLEAR-APP source checkout. Give Claude access to the ApiLens checkout or the `apilens-next-sdk-0.4.0.tgz` release artifact too.
 
 ```text
-Implement controlled local QA server tracing in CLEAR-APP using the NEW
-@apilens/next-sdk@0.1.0. Do not use @apilens/node-sdk (the legacy Express SDK).
+Integrate @apilens/next-sdk@0.4.0 into CLEAR-APP so ApiLens shows the SERVER
+side of every journey (pages, Server Components, server actions, route
+handlers, Edge middleware, and the JCS/CMS/auth calls each one makes, with
+redacted request and response bodies), not only the browser's traffic.
+Do NOT use @apilens/node-sdk (legacy Express SDK) or any 0.1-0.3 instructions.
 
 ApiLens repository: https://github.com/johnson3235/apilens
-Local ApiLens checkout, if available:
-C:\Users\YoussefJ\Documents\GitHub\New_Github_Cloud\apilens-main
-SDK source: sdks/next
-SDK artifact: sdks/next/apilens-next-sdk-0.1.0.tgz
-Authoritative instructions: sdks/next/README.md and docs/frontend-sdk-setup.md.
-Read those files and the SDK exports before implementation. If the local path
-is unavailable, obtain the source from the repository through authorized access
-or ask for the artifact. Do not invent package exports or npm publication.
+Authoritative sources, read them fully before writing code:
+- sdks/next/README.md (API, the 0.4.0 review-fix table, steps 1, 2 and 3d)
+- docs/frontend-sdk-setup.md (CLEAR-APP footprint + acceptance table)
+- sdks/next/src/index.ts, src/edge.ts, src/types.ts (real exports and options)
+- examples/clear-demo-app (working reference: lib/apilens.ts,
+  instrumentation.ts, middleware.ts, scripts/check-live.mjs)
+If anything here conflicts with the SDK source, the source wins: tell me.
+Do not invent exports, options or npm publication.
 
-1. Inspect and protect the repository
-- Read applicable AGENTS.md instructions, package.json, Yarn configuration,
-  Next version, tsconfig, next.config, instrumentation, route handlers and
-  existing tests. Check git status, branch, remotes and worktrees.
-- The FE team reports 32 App Router /api routes, native fetch via
-  @vfie/core-networking@0.0.594, no custom server, and Edge src/middleware.ts.
-  Verify these observations against this checkout.
-- Do not modify or commit onto feat/clear-payg-order-summary. It has been
-  reported to contain tracked .env.development changes and untracked briefs.
-- Use a separate clean worktree on chore/adhoc-apilens-qa-setup from develop.
-  Inspect whether the branch/worktree already exists before creating it;
-  never overwrite or repurpose another dirty worktree.
-- Preserve existing edits. No reset --hard, forced checkout, automatic stash,
-  deletion of briefs, or modification of tracked .env.* files.
-- Do not create .env.example. Do not commit/push or open a PR unless I ask.
+0. Confirm the setup (stop and report if it differs)
+- Next.js App Router on Next 14.2 with experimental.instrumentationHook,
+  a long-lived Node server (standalone container), Edge src/middleware.ts,
+  Datadog via --require @vfie/wef-tracing, @vfie/core-networking on global
+  fetch, about 33 API routes and about 38 Server Component pages. Record
+  what you actually find.
 
-2. Install the correct portable SDK
-- @apilens/next-sdk is not published to npm. Do not run an unverified registry
-  install or try to install the old workspace:* package directly with Yarn.
-- If necessary, build/pack from the ApiLens checkout:
-  pnpm install --frozen-lockfile
-  pnpm --filter @apilens/next-sdk build
-  pnpm --filter @apilens/next-sdk test
-  Then run pnpm pack from sdks/next.
-- Install the resulting tarball using CLEAR-APP's existing Yarn version and
-  approved artifact policy. If vendor artifacts are allowed, a relative
-  file:./vendor/apilens-next-sdk-0.1.0.tgz dependency is suitable.
-- The artifact must be available to CI. Never commit a dependency/lockfile
-  reference to a developer-only absolute path. If distribution policy is
-  unclear, ask for the approved location rather than publishing externally.
+1. Protect existing work
+- Read AGENTS.md / CLAUDE.md, git status, branch, remotes, worktrees.
+- Do not touch the dirty feat/clear-payg-order-summary checkout, its tracked
+  .env.* changes or untracked briefs. Work in a clean worktree on
+  chore/adhoc-apilens-qa-setup from develop (check whether it exists first).
+- No reset --hard, forced checkout, stash, deletion, edits to tracked .env.*,
+  or .env.example. No commit, push or PR unless I ask.
 
-3. Create one server-only singleton
-- Add a module such as src/lib/apilens.server.ts protected by server-only.
-  Confirm the marker dependency is available and respect current conventions.
-- Import { ApiLensNextSDK } from '@apilens/next-sdk'.
-- Reuse one singleton across development HMR, using a typed globalThis slot.
-- Constructor options:
+2. Install the package
+- Use the next-sdk-v0.4.0 GitHub Release tarball (check its SHA-256) or build
+  it: pnpm install --frozen-lockfile; pnpm --filter @apilens/next-sdk build;
+  pnpm --filter @apilens/next-sdk test; cd sdks/next; pnpm pack.
+- Verify package.json says 0.4.0 and that both '@apilens/next-sdk' and
+  '@apilens/next-sdk/edge' resolve.
+- Install with CLEAR-APP's own Yarn from the approved artifact location
+  (vendor/apilens-next-sdk-0.4.0.tgz if vendoring is allowed, else ask).
+  Never commit a lockfile entry pointing at a personal absolute path.
+
+3. Server-only singleton: src/lib/apilens.server.ts
+- import 'server-only'; one HMR-safe ApiLensNextSDK on a typed globalThis slot.
+- Options:
   serviceName: 'clear-app-bff'
-  enabled: process.env.APILENS_ENABLED === 'true'
-  agentToken: process.env.APILENS_AGENT_TOKEN
-  agentUrl: 'http://127.0.0.1:7317'
-  allowedAppOrigins: [the actual approved local CLEAR-APP origin]
-- Do not guess the port. Discover it from the current dev configuration.
-- Keep propagateToOrigins empty unless downstream propagation is explicitly
-  approved. Outbound fetch calls are still captured without adding headers to
-  downstream services. Never change Authorization or application credentials.
-- Never import the SDK into Client Components, hooks or browser code.
-- The token is a server-only secret: no NEXT_PUBLIC_ prefix, hardcoded value,
-  committed env file, logging of its value or inclusion in evidence.
-- Document approved runtime configuration and restart requirements without
-  writing tokens into tracked files. Remain disabled by default.
+  enabled: process.env.APILENS_ENABLED === 'true'      // off by default
+  reportToAgent: false                                 // remote dev server
+  allowedAppOrigins: [the real CLEAR-APP dev origin(s), discovered, not guessed]
+  captureWithoutSession: true
+  captureBodies: { request: true, response: true, maxBytes: 64 * 1024,
+                   redactKeys: [CLEAR-specific sensitive keys you find, e.g.
+                   contactRef, accountNumber; list what you chose] }
+  control: { enabled: true, token: process.env.APILENS_CONTROL_TOKEN ?? '',
+             bufferSize: 500, maxBufferBytes: 32 * 1024 * 1024,
+             expiresAt: process.env.APILENS_CONTROL_EXPIRES_AT }
+  autoInstrument: { ignorePaths: ['/api/check-session'] }
+  allowRouteMocks: false
+- Pass the token as is: 0.4.0 never throws on a missing or short token, it
+  switches the control plane off and reports it in diagnostics.configIssues.
+  Do not add your own length gate.
+- Datadog agent traffic (:8126, DD_AGENT_HOST, DD_TRACE_AGENT_URL) is ignored
+  automatically; add ignoreOutgoing only for other non-QA hosts you find.
+- Tokens are server-only secrets: never NEXT_PUBLIC_*, hardcoded, logged,
+  committed, or placed in evidence. Never import this module into Client
+  Components, hooks or middleware.
 
-4. Integrate the Node boot hook (the only wiring)
-- Merge with the existing instrumentation.ts register() function, preserving
-  current instrumentation. Under process.env.NEXT_RUNTIME === 'nodejs',
-  dynamically import the singleton and call apiLens.install().
-- Check the installed Next version and enable instrumentation only if its
-  documented configuration requires it. Do not blindly add obsolete flags.
-- Do not use Edge src/middleware.ts as the mount point. Do not invent an
-  Express custom server or silently change Edge routes to Node runtime.
-- With @apilens/next-sdk 0.3.0 the boot hook captures every Node-runtime
-  page, Server Component, server action and route handler, plus the fetch
-  calls each one makes. Do NOT edit page, layout or route files, and do not
-  add wrapRoute/traceRender calls. Adjust coverage only through the
-  singleton's config (autoInstrument.ignorePaths).
-- Existing core-networking/fetch calls must remain unchanged.
-- List Edge-runtime routes and pages explicitly: they are not captured.
+4. Boot hook (the only Node wiring)
+- In the existing instrumentation.ts register(), inside the
+  NEXT_RUNTIME === 'nodejs' branch and after patchConsole():
+    const { apiLens } = await import('./lib/apilens.server');
+    apiLens.install();
+- Do NOT edit page, layout or route files, do NOT add wrapRoute/traceRender,
+  and do NOT add a control route file: install() serves /api/__apilens from
+  its request hook. Confirm no rewrite/auth layer in front of Next blocks it.
 
-5. Verify the integration honestly
-- Run scoped tests, typecheck and scoped lint using the project's conventions.
-  Do not run lint:all or build:all by default or weaken their rules.
-- Test enabled/disabled behavior, missing QA headers, preserved params and
-  responses, fetch errors/aborts, concurrent sessions, and SDK import isolation.
-- For local integration, build and start the ApiLens agent in its repository:
-  pnpm --filter @apilens/agent build
-  pnpm agent
-- Agent is required for SERVER spans, not for browser-only extension capture.
-  Use the same token for the SDK and extension Settings. Do not print it.
-- The ingestion endpoint is authenticated POST /v1/spans, not the old
-  /api/v1/traces/ingest. Health is /health.
-- Build/reload apps/browser-extension/dist, connect the agent in Settings,
-  enable Inject trace headers, start a QA session in the target app tab and
-  reload. Trigger an approved local route. Expand Traces and verify browser
-  -> incoming route -> outbound fetch with matching parent/session IDs.
-- Check apiLens.diagnostics and use await apiLens.flush() in a controlled
-  test to verify delivery. A stopped agent or bad token must not break the app.
-- Verify credential-like header values are masked and diagnostic headers
-  remain visible. Review application-specific PII before sharing.
-- Do not claim CLEAR-APP E2E success if browser/server access or local secrets
-  are missing. Finish safe code/tests and state the exact remaining check.
+5. Edge middleware
+- Wrap the existing exported middleware in src/middleware.ts with
+  withApiLens from '@apilens/next-sdk/edge':
+    enabled: process.env.APILENS_ENABLED === 'true',
+    controlToken: process.env.APILENS_CONTROL_TOKEN,
+    serviceName: 'clear-app-middleware',
+    captureWithoutSession: true,
+    ingestUrl: the pod's own address (e.g. http://127.0.0.1:${PORT}/api/__apilens)
+               if the public host does not route back to the same pod.
+- Keep the matcher, the logic and the export style unchanged. Confirm the
+  env vars are readable in middleware at runtime in this deployment.
 
-6. Safety and coverage boundaries
-- Local long-lived Node runtime is the supported deployment for this version.
-  A remote preprod server's localhost is NOT the tester's laptop. Stop and
-  request the approved collection design before remote/preprod deployment.
-  Do not expose the agent publicly or weaken authentication/network controls.
-- Do not mock preprod or fake a real submit-order success during validation.
-- This captures wrapped HTTP handlers and global/native fetch within their
-  QA async context, not automatically SSR/Server Components, Server Actions,
-  Edge, background jobs, DB queries, direct http.request or other services'
-  internal calls. Cached fetch invocations are not necessarily wire requests.
-- Response bodies and stream-completion timing are not captured. Telemetry
-  is bounded/best-effort; dropped span diagnostics must not be hidden.
-- Do not expand into these missing capabilities without separate approval.
+6. Verify honestly
+- Scoped typecheck, lint and tests per project conventions (not lint:all or
+  build:all). Add tests for: SDK disabled = nothing patched and behavior
+  unchanged; missing/short token = app boots, /api/__apilens returns 404.
+- Run CLEAR-APP locally with APILENS_ENABLED=true and a generated 24+ char
+  token in an untracked .env.local or the shell only. Then:
+  curl -H "Authorization: Bearer $TOKEN" http://localhost:<port>/api/__apilens/health
+  -> sdkVersion 0.4.0, configIssues [].
+  Load a session-gated page and an /api route, then GET /api/__apilens/calls:
+  expect page call + nested JCS/CMS calls with bodies, a clear-app-middleware
+  call with its session/journey calls, msisdn/e-mail redacted, no :8126 calls.
+- Extension 1.4.0: Settings -> Instrumented server -> origin + token ->
+  Test connection (shows configIssues) -> Start QA session -> reload ->
+  Server API -> My session shows only your calls.
+- Server mock on a harmless GET only: one 'once' rule -> call marked mocked,
+  appliedCount 1. Never mock or fake submit-order or payment endpoints.
+- If cluster access, sessions or secrets are missing, finish the safe code and
+  tests and state exactly which check remains. Never claim unobserved success.
 
-7. Deliverables
-- Implement the scoped integration; do not stop at a plan.
-- Add a concise CLEAR-APP setup/runbook and route coverage inventory.
-- List changed files, the actual worktree/branch, exact test commands/results,
-  how to activate tracing without committing secrets, and rollback steps.
-- Report what was and was not verified against the running CLEAR-APP app.
-- Leave changes uncommitted for review unless I explicitly request a commit.
+7. Safety limits
+- Dev only, never preprod or prod. The control token exposes redacted
+  payloads: set expiresAt or rotate it after each QA exercise.
+- Not captured: Next fetch-cache hits (no backend call happened), DB queries,
+  Edge route handlers, background jobs. List any you find.
+
+8. Deliverables
+- Implement it; do not stop at a plan.
+- docs/apilens-qa.md runbook: enable locally and on dev, env var names (no
+  values), connecting the extension, rollback (APILENS_ENABLED=false + restart).
+- Coverage table: pages, routes, middleware calls observed vs not observed.
+- Changed files, branch/worktree, exact commands and results, what was and
+  was not verified. Leave everything uncommitted for my review.
 ```

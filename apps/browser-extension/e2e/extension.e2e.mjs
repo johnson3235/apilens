@@ -14,7 +14,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const EXT = resolve(here, '../../apps/browser-extension/dist');
+const EXT = resolve(here, '../dist');
 
 const results = [];
 let failures = 0;

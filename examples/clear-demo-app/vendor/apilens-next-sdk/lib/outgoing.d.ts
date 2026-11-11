@@ -23,6 +23,7 @@ export type OutgoingHook = (call: OutgoingCall, original: RequestFn) => ClientRe
 /** The real `http.request`, for the SDK's own traffic, which must never be captured. */
 export declare function unpatchedHttpRequest(): typeof http.request;
 export declare function setOutgoingHook(hook: OutgoingHook): void;
+/** Detaches `hook` and, when nothing has wrapped them since, restores Node's own client functions. */
 export declare function clearOutgoingHook(hook: OutgoingHook): void;
 /** Error shapes HTTP clients recognise (axios, got, etc. read `code`). */
 export declare function simulatedConnectionError(ruleName: string): Error;

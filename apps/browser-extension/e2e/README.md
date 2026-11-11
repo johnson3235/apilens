@@ -52,8 +52,10 @@ profile directory which it removes afterwards.
 
 `server.e2e.mjs` checks the Server API workspace against the instrumented demo app
 (see [docs/SETUP.md](../../../docs/SETUP.md#demo-applications)): incoming routes with their
-upstream calls, payload capture and redaction, and a server mock created from a captured
-call in the panel, saved, enabled, observed, then removed.
+upstream calls, payload capture and redaction, a server mock created from a captured
+call in the panel, saved, enabled, observed, then removed, and the shared-server session
+tag: a recording tab's page loads and API calls reach the server with its QA session id,
+**My session** is offered, and the tag is gone once the session stops.
 
 ```powershell
 $env:APILENS_CONTROL_TOKEN = '<token the demo app was started with>'

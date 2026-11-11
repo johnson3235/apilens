@@ -5,6 +5,7 @@
  * path — not in the UI. A value that was never buffered cannot leak through an
  * evidence export, a screenshot or a shared HAR file.
  */
+export declare function isSensitiveKey(key: string): boolean;
 export declare const REDACTED = "[REDACTED]";
 export declare function isSensitiveHeader(name: string): boolean;
 export declare function redactHeaders(headers: Headers | Record<string, string> | null): Record<string, string>;

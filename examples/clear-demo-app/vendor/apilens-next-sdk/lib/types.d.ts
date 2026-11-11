@@ -138,6 +138,11 @@ export interface ControlHealth {
     /** Highest `seq` currently buffered. */
     latestSeq: number;
     droppedCalls: number;
+    /** Approximate memory held by buffered calls (optional for older SDKs). */
+    bufferedBytes?: number;
+    maxBufferBytes?: number;
+    /** Settings the SDK switched off at boot instead of crashing (optional for older SDKs). */
+    configIssues?: ConfigIssue[];
     ruleCount: number;
     activeRuleCount: number;
     agentDelivery: {
@@ -186,6 +191,24 @@ export interface ControlPlaneOptions {
     allowedOrigins?: string[];
     /** Calls retained in the ring buffer. Default 500. */
     bufferSize?: number;
+    /**
+     * Upper bound on the memory the buffered calls may hold, in bytes. Oldest
+     * calls are evicted first once it is reached. Default 32 MB, so a busy pod
+     * can never hold `bufferSize × 2 × maxBytes` worth of payloads.
+     */
+    maxBufferBytes?: number;
+    /**
+     * Where the control plane is served. Default `/api/__apilens`. With
+     * auto-instrumentation on, the SDK answers this path itself before Next
+     * sees the request, so no route file is needed.
+     */
+    path?: string;
+    /**
+     * The control plane stops answering (404) after this moment: an ISO date or
+     * epoch milliseconds. Use it so a token handed out for one QA exercise
+     * cannot outlive it even if nobody remembers to rotate it.
+     */
+    expiresAt?: string | number;
     /** Allow the extension to push mock rules. Default true. */
     allowMockControl?: boolean;
     /**
@@ -248,6 +271,18 @@ export interface NextSDKOptions {
      * `fetch` is always covered. Default true.
      */
     captureNodeHttp?: boolean;
+    /**
+     * Outgoing calls that are never captured or mocked. A string matches a
+     * `host`, `host:port` or URL prefix; a RegExp is tested against the full URL.
+     * Tracer and telemetry agents (Datadog `:8126`, OpenTelemetry `:4317/:4318`,
+     * and the hosts in `DD_AGENT_HOST` / `DD_TRACE_AGENT_URL`) are always ignored.
+     */
+    ignoreOutgoing?: (string | RegExp)[];
+}
+/** Why part of the configuration was switched off instead of stopping the app. */
+export interface ConfigIssue {
+    setting: string;
+    problem: string;
 }
 export interface AutoInstrumentOptions {
     /**
@@ -261,5 +296,13 @@ export interface AutoInstrumentOptions {
      * API routes, non-GET requests and failures are always recorded.
      */
     recordAllRequests?: boolean;
+    /** Same as the top-level `ignoreOutgoing`; both lists apply. */
+    ignoreOutgoing?: (string | RegExp)[];
+    /**
+     * Record outgoing calls that start after the incoming response has already
+     * finished. They are usually background work (tracer flushes, timers, token
+     * refreshes) that merely inherited the request's async context. Default false.
+     */
+    recordAfterResponse?: boolean;
 }
 //# sourceMappingURL=types.d.ts.map

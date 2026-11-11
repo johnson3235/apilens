@@ -1,8 +1,8 @@
-import type { ControlHealth, NextSDKOptions, ServerCall, ServerMockRule } from './types';
+import type { ConfigIssue, ControlHealth, NextSDKOptions, ServerCall, ServerMockRule } from './types';
 export * from './types';
 export { DEFAULT_TEXT_CONTENT_TYPES } from './bodies';
 export { MIN_TOKEN_LENGTH } from './control';
-export declare const SDK_VERSION = "0.3.0";
+export declare const SDK_VERSION = "0.4.0";
 /**
  * Session id used when `captureWithoutSession` is on.
  *
@@ -33,6 +33,12 @@ export interface ServerSpan {
     error: string | null;
     mockedBy: string | null;
 }
+/**
+ * Builds the outgoing ignore test. A string with a scheme is a URL prefix,
+ * `:port` matches any host on that port, `host:port` the exact pair, and a
+ * bare host that host or its subdomains.
+ */
+export declare function outgoingMatcher(rules: (string | RegExp)[]): (url: string) => boolean;
 export declare function safeHeaders(headers: Headers): Record<string, string>;
 export declare class ApiLensNextSDK {
     private readonly options;
@@ -59,6 +65,13 @@ export declare class ApiLensNextSDK {
     private readonly auto;
     private requestHook;
     private outgoingHook;
+    /** The control settings actually in force, after validation. */
+    private readonly controlOptions;
+    private readonly controlPath;
+    private readonly isIgnoredOutgoing;
+    private readonly issues;
+    private lateCallsSkipped;
+    private ignoredOutgoingCalls;
     /** Distinguishes a restarted server from an idle one in the extension. */
     readonly processId: string;
     readonly startedAt: number;
@@ -66,6 +79,9 @@ export declare class ApiLensNextSDK {
     get diagnostics(): {
         relayFailures: number;
         lastRelayError: string | null;
+        configIssues: ConfigIssue[];
+        lateCallsSkipped: number;
+        ignoredOutgoingCalls: number;
         accepted: number;
         dropped: number;
         lastError: string | null;
@@ -97,6 +113,12 @@ export declare class ApiLensNextSDK {
         DELETE: (request: Request) => Promise<Response>;
         OPTIONS: (request: Request) => Promise<Response>;
     };
+    private isControlPath;
+    /**
+     * Answers the control plane straight from the request hook, before Next
+     * routes the request, so the application needs no control route file.
+     */
+    private serveControl;
     /**
      * Turns capture on for the whole server. Call once from `register()` in
      * instrumentation.ts; no page, layout or route file needs to change.
@@ -104,6 +126,12 @@ export declare class ApiLensNextSDK {
     install(): void;
     /** Same as `install()`; kept for 0.2 integrations, which already call it at boot. */
     installFetch(): void;
+    /**
+     * True for calls that are passed through untouched: tracer and agent
+     * traffic, configured ignores, and background work that only inherited the
+     * context of a request whose response has already been sent.
+     */
+    private skipOutgoing;
     /** Opens a capture context around one incoming request; never lets a failure reach the app. */
     private onIncoming;
     private autoContext;

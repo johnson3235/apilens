@@ -77,15 +77,25 @@ try {
     page.status === 200 && page.html.includes('€80.00') && page.html.includes('€12.99') && page.html.includes('INV-2026-09'),
     `HTTP ${page.status}`);
 
-  const isPage = (call) => call.kind === 'server' && call.path === '/myaccount/billing';
-  const calls = await callsWhere((list) => list.some(isPage) && list.filter((call) => call.path.startsWith('/api/services/')).length >= 3);
+  const isPage = (call) => call.kind === 'server' && call.path === '/myaccount/billing' && !call.serviceName.endsWith('middleware');
+  const isMiddleware = (call) => call.kind === 'server' && call.path === '/myaccount/billing' && call.serviceName.endsWith('middleware');
+  const pageBackend = (list) => {
+    const pageSpan = list.find(isPage)?.spanId;
+    return list.filter((call) => call.kind === 'client' && call.parentSpanId === pageSpan && call.path.startsWith('/api/services/'));
+  };
+  const calls = await callsWhere((list) => list.some(isPage) && pageBackend(list).length >= 3 && list.some(isMiddleware));
   const pageCall = calls.find(isPage);
-  const backendCalls = calls.filter((call) => call.kind === 'client' && call.path.startsWith('/api/services/'));
+  const backendCalls = pageBackend(calls);
+  const middlewareCall = calls.find(isMiddleware);
+  const sessionCall = calls.find((call) => call.kind === 'client' && call.parentSpanId === middlewareCall?.spanId);
   check('page render captured as a page call', Boolean(pageCall), pageCall ? `${pageCall.method} ${pageCall.path}` : `${calls.length} calls seen`);
   check('3 backend calls captured', backendCalls.length === 3, backendCalls.map((call) => call.path.split('/')[3]).join(', '));
   check('backend calls are linked to the page call',
     backendCalls.length === 3 && backendCalls.every((call) => call.parentSpanId === pageCall?.spanId));
   check('backend answers captured', backendCalls.some((call) => call.responseBody?.content?.includes('12.99')));
+  check('Edge middleware session lookup captured', sessionCall?.path === '/api/services/session/3055861',
+    sessionCall ? `${middlewareCall.serviceName}: ${sessionCall.method} ${sessionCall.path} → ${sessionCall.statusCode}` : 'no middleware calls (withApiLens in middleware.ts?)');
+  check('middleware payload redacted', Boolean(sessionCall?.responseBody?.content?.includes('"msisdn": "[REDACTED]"')));
 
   // One-shot "Service is down" on the next-bill backend call, as the panel would create it.
   const now = Date.now();

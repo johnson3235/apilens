@@ -119,6 +119,11 @@ export interface ServerControlHealth {
   bufferedCalls: number;
   latestSeq: number;
   droppedCalls: number;
+  /** Present from SDK 0.4.0. */
+  bufferedBytes?: number;
+  maxBufferBytes?: number;
+  /** Settings the SDK switched off at boot instead of crashing (SDK 0.4.0+). */
+  configIssues?: Array<{ setting: string; problem: string }>;
   ruleCount: number;
   activeRuleCount: number;
   agentDelivery: { accepted: number; dropped: number; lastError: string | null };

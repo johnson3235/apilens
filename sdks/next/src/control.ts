@@ -62,6 +62,20 @@ export function isTokenAcceptable(token: string | undefined): boolean {
   return typeof token === 'string' && token.length >= MIN_TOKEN_LENGTH;
 }
 
+/** Epoch milliseconds after which the control plane stops answering, or null for no expiry. */
+export function parseExpiry(value: string | number | undefined): number | null {
+  if (value === undefined || value === '') return null;
+  const at = typeof value === 'number' ? value : Date.parse(value);
+  // An unreadable expiry fails closed: better a 404 than a token that never ends.
+  return Number.isFinite(at) ? at : 0;
+}
+
+/** Normalised control mount, e.g. `/api/__apilens`, without a trailing slash. */
+export function controlMountPath(value: string | undefined): string {
+  const path = (value ?? '/api/__apilens').trim();
+  return `/${path.replace(/^\/+|\/+$/g, '')}`;
+}
+
 /**
  * Resolves the operation from the request path.
  *
@@ -80,6 +94,7 @@ export function createControlHandler(context: ControlContext): (request: Request
   let windowCount = 0;
   let authFailures = 0;
   let lockedUntil = 0;
+  const expiresAt = parseExpiry(context.options.expiresAt);
 
   function corsHeaders(request: Request): Record<string, string> {
     const base: Record<string, string> = {
@@ -112,7 +127,7 @@ export function createControlHandler(context: ControlContext): (request: Request
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
 
-    if (!context.options.enabled || !isTokenAcceptable(context.options.token)) {
+    if (!context.options.enabled || !isTokenAcceptable(context.options.token) || (expiresAt !== null && Date.now() >= expiresAt)) {
       // Indistinguishable from an unmounted route, so a disabled control plane
       // never advertises that ApiLens is installed.
       return reply(request, 404, { error: 'Not found' });

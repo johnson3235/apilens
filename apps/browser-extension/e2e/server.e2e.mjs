@@ -173,6 +173,32 @@ try {
   const next = await checkout();
   check('one-shot mock fires only once', next.status === 200, `HTTP ${next.status}`);
   await control('/rules', { method: 'DELETE' });
+
+  // Shared server: a recording tab's own requests carry its QA session, page loads included.
+  const started = await panel.evaluate(async (appUrl) => {
+    const [tab] = await chrome.tabs.query({ url: `${appUrl}/*` });
+    return chrome.runtime.sendMessage({ type: 'session:start', name: 'e2e shared-server session', tabId: tab?.id });
+  }, APP);
+  const sessionId = started?.state?.session?.id;
+  await control('/calls', { method: 'DELETE' });
+  await app.reload({ waitUntil: 'networkidle' });
+  await app.waitForTimeout(800);
+  const tagged = ((await control('/calls?since=0&limit=500')).calls ?? []).filter((call) => call.kind === 'server');
+  const mine = tagged.filter((call) => call.sessionId === sessionId);
+  check('recording tab tags its requests with the QA session', Boolean(sessionId) && mine.length > 0 && mine.length === tagged.length,
+    `${mine.length}/${tagged.length} server calls carried ${sessionId ?? 'no session'}: ${mine.map((call) => `${call.method} ${call.path}`).join(', ')}`);
+
+  await panel.locator('.nav-item', { hasText: 'Server API' }).click();
+  await panel.waitForTimeout(2_500);
+  check('Server API offers My session / Everyone', await panel.getByRole('button', { name: 'My session' }).count() === 1);
+  await shot(panel, 'server-calls-my-session');
+
+  await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'session:stop' }));
+  await control('/calls', { method: 'DELETE' });
+  await app.reload({ waitUntil: 'networkidle' });
+  await app.waitForTimeout(800);
+  const afterStop = (await control('/calls?since=0&limit=500')).calls ?? [];
+  check('tag removed when the session stops', afterStop.every((call) => call.sessionId !== sessionId), `${afterStop.length} calls after stop`);
 } catch (error) {
   failures += 1;
   console.log(`FAIL  unexpected error — ${error instanceof Error ? error.message : String(error)}`);
