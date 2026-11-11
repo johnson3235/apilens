@@ -534,12 +534,28 @@ export function serverCallHost(call: Pick<ServerCall, 'origin'>): string {
 
 /** One sentence a non-developer can read: who was called, and how it answered. */
 export function explainServerCall(call: ServerCall): string {
+  if (call.stage === 'middleware' && call.kind === 'server') {
+    const outcome = call.statusCode !== null && call.statusCode >= 300 && call.statusCode < 400
+      ? ` and redirected the browser (${describeStatus(call)})`
+      : call.status === 'error' ? ` and failed (${describeStatus(call)})` : ' and let the request through';
+    return `The Edge middleware checked ${call.path} before the page rendered${outcome}, in ${Math.round(call.durationMs)} ms.`;
+  }
+  if (call.cache === 'hit') {
+    return `Next answered ${call.method} ${serverCallHost(call)}${call.path} from its own cache: the backend was not called this time. The data shown is what the page received.`;
+  }
+  const who = call.stage === 'middleware' ? 'The Edge middleware' : 'The server';
   const target = call.kind === 'client'
-    ? `The server called the backend ${serverCallHost(call)} (${call.method} ${call.path})`
+    ? `${who} called the backend ${serverCallHost(call)} (${call.method} ${call.path})`
     : `The page asked this server for ${call.path} (${call.method})`;
   const answer = call.statusCode === null
     ? call.error ? ' but got no answer.' : '.'
     : ` and got “${describeStatus(call)}” in ${Math.round(call.durationMs)} ms.`;
   const mocked = call.mockedBy ? ` This answer came from your mock “${call.mockedBy}”, not the real backend.` : '';
   return `${target}${answer}${mocked}`;
+}
+
+/** Short kind label used across the Server view: what produced this row. */
+export function serverCallKindLabel(call: Pick<ServerCall, 'kind' | 'stage' | 'cache'>): 'Page' | 'Middleware' | 'Backend' | 'Cache' {
+  if (call.kind === 'server') return call.stage === 'middleware' ? 'Middleware' : 'Page';
+  return call.cache === 'hit' ? 'Cache' : 'Backend';
 }

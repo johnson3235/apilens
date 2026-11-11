@@ -318,3 +318,28 @@ export function parseMutations(source: string): ServerMockRule['action']['fieldM
     })
     .filter((mutation) => Boolean(mutation.path));
 }
+
+/** "When the server makes the backend call GET /billing, it gets: Service is down." */
+export function serverRuleSentence(rule: ServerMockRule): string {
+  const preset = SERVER_MOCK_PRESETS.find((candidate) => JSON.stringify(candidate.apply(rule).action) === JSON.stringify(rule.action));
+  const outcome = preset ? preset.title : rule.action.type === 'custom-body' ? 'your own answer' : rule.action.type;
+  const spent = rule.applyMode === 'once' && rule.appliedCount >= 1 ? ' Already used once — it will not fire again.' : '';
+  return `When the server makes ${describeRuleTarget(rule)}, it gets: ${outcome}.${spent}`;
+}
+
+export function blankServerRule(serviceName: string): ServerMockRule {
+  const now = Date.now();
+  return {
+    id: `srv-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    name: 'New server rule',
+    description: `Manually created for ${serviceName}.`,
+    enabled: false,
+    priority: 100,
+    match: { method: 'ANY', urlPattern: '', matchType: 'glob', kind: 'client' },
+    action: { type: 'status-code', statusCode: 503, body: JSON.stringify({ error: 'Service unavailable', simulated: true }, null, 2) },
+    applyMode: 'always',
+    appliedCount: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+}

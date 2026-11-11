@@ -84,12 +84,12 @@ const data = (overrides: Partial<ServerData> = {}): ServerData => ({
 const noop = (): void => undefined;
 
 describe('ServerView', () => {
-  it('renders captured calls with connection and capture readiness', () => {
+  it('renders captured calls with the live connection', () => {
     const html = renderToStaticMarkup(<ServerView data={data()} onSettings={noop} onCopy={noop} onNotice={noop} />);
-    expect(html).toContain('Server API calls');
-    expect(html).toContain('clear-app-bff');
+    expect(html).toContain('Server calls');
+    expect(html).toContain('Live · clear-app-bff');
     expect(html).toContain('/v2/billing');
-    expect(html).toContain('Connected');
+    expect(html).toContain('Backend');
   });
 
   it('shows only this tester\'s session while recording, and explains an empty filter', () => {
@@ -100,64 +100,94 @@ describe('ServerView', () => {
     expect(mine).not.toContain('/v2/other-tester');
 
     const untagged = renderToStaticMarkup(<ServerView data={data({ calls: [other] })} sessionId="qa-9" onSettings={noop} onCopy={noop} onNotice={noop} />);
-    expect(untagged).toContain('None of the 1 server calls are tagged with your session yet');
+    expect(untagged).toContain('None of the 1 server calls carry your session yet');
+    expect(untagged).toContain('Show everyone');
 
     const notRecording = renderToStaticMarkup(<ServerView data={data({ calls: [call, other] })} onSettings={noop} onCopy={noop} onNotice={noop} />);
     expect(notRecording).not.toContain('My session');
     expect(notRecording).toContain('/v2/other-tester');
   });
 
-  it('surfaces SDK configuration issues and memory use from health', () => {
-    const health = { ...status.health!, sdkVersion: '0.4.0', bufferedBytes: 30 * 1024 * 1024, maxBufferBytes: 32 * 1024 * 1024,
-      configIssues: [{ setting: 'agentToken', problem: 'Missing, so spans are not delivered to the local agent.' }] };
-    const html = renderToStaticMarkup(<ServerView data={data({ status: { ...status, health } })} onSettings={noop} onCopy={noop} onNotice={noop} />);
-    expect(html).toContain('Server memory');
-    expect(html).toContain('agentToken');
+  it('explains an empty list from the server’s own counters, with the fix to copy', () => {
+    const health = {
+      ...status.health!, sdkVersion: '0.5.0', bufferedBytes: 30 * 1024 * 1024, maxBufferBytes: 32 * 1024 * 1024,
+      configIssues: [{ setting: 'agentToken', problem: 'Missing, so spans are not delivered to the local agent.' }],
+      capture: {
+        installed: true, installedBy: 'boot' as const, requestsSeen: 9, requestsRecorded: 0,
+        skipped: { ignoredPath: 0, noSession: 0, originNotAllowed: 9, noBackendCall: 0 },
+        lastRejectedOrigin: 'http://10.0.0.7:3000', learnedOrigins: [], backendCalls: 0, cacheHits: 0, middlewareRuns: 0, lastRequestAt: 1,
+      },
+    };
+    const html = renderToStaticMarkup(<ServerView data={data({ calls: [], status: { ...status, health } })} onSettings={noop} onCopy={noop} onNotice={noop} />);
+    expect(html).toContain('9 requests ignored: unknown app address');
+    expect(html).toContain('allowedAppOrigins: [&#x27;http://10.0.0.7:3000&#x27;],');
+    expect(html).toContain('agentToken is switched off');
+    expect(html).toContain('Server memory for captures is nearly full');
+    expect(html).toContain('Copy');
+  });
+
+  it('flags a problem in the header while calls are listed', () => {
+    const html = renderToStaticMarkup(<ServerView data={data({ status: { ...status, gap: true } })} onSettings={noop} onCopy={noop} onNotice={noop} />);
+    expect(html).toContain('Some calls were dropped');
+    expect(html).toContain('/v2/billing');
   });
 
   it('tells the tester what to do when no server is configured', () => {
     const html = renderToStaticMarkup(
       <ServerView data={data({ status: { ...status, configured: false, connected: false, health: null } })} onSettings={noop} onCopy={noop} onNotice={noop} />,
     );
-    expect(html).toContain('No instrumented server connected');
-    expect(html).toContain('Open settings');
+    expect(html).toContain('See what the app’s server does behind the page');
+    expect(html).toContain('Link a server');
   });
 
-  it('surfaces a sync failure instead of showing an empty list', () => {
+  it('surfaces a sync failure instead of claiming capture is ready', () => {
     const html = renderToStaticMarkup(
       <ServerView data={data({ calls: [], error: 'Control token rejected by the server.' })} onSettings={noop} onCopy={noop} onNotice={noop} />,
     );
-    expect(html).toContain('Server link problem');
+    expect(html).toContain('Can’t reach the server.');
     expect(html).toContain('Control token rejected');
+    expect(html).not.toContain('Capture is ready');
   });
 
-  it('warns when the server buffer rolled over between polls', () => {
-    const html = renderToStaticMarkup(
-      <ServerView data={data({ status: { ...status, gap: true } })} onSettings={noop} onCopy={noop} onNotice={noop} />,
-    );
-    expect(html).toContain('Older calls were dropped');
+  it('counts failed, mocked and cached calls in the filter chips', () => {
+    const failed: ServerCall = { ...call, spanId: 'f', seq: 3, statusCode: 503, status: 'error', mockedBy: 'billing down' };
+    const cached: ServerCall = { ...call, spanId: 'c', seq: 4, cache: 'hit' };
+    const html = renderToStaticMarkup(<ServerView data={data({ calls: [call, failed, cached] })} onSettings={noop} onCopy={noop} onNotice={noop} />);
+    expect(html).toMatch(/Failed <b>1<\/b>/);
+    expect(html).toMatch(/Mocked <b>1<\/b>/);
+    expect(html).toMatch(/Cached <b>1<\/b>/);
+    expect(html).toContain('>Cache<');
   });
 });
 
-describe('ServerView route grouping', () => {
+describe('ServerView page grouping', () => {
   const route: ServerCall = { ...call, seq: 2, spanId: 'route-1', kind: 'server', method: 'GET', url: 'https://app.example.com/api/bill', origin: 'https://app.example.com', path: '/api/bill', startedAt: 5 };
   const child: ServerCall = { ...call, parentSpanId: 'route-1' };
 
-  it('lists the route first and its upstream call under it with the upstream host', () => {
+  it('lists the page first, its backend call under it, and what the page needed', () => {
     const html = renderToStaticMarkup(<ServerView data={data({ calls: [child, route] })} onSettings={noop} onCopy={noop} onNotice={noop} />);
-    expect(html).toContain('Group by page call');
-    expect(html).toContain('1 backend call');
-    expect(html).toContain('Simulate a problem');
+    expect(html).toContain('By page');
+    expect(html).toContain('1 backend');
     expect(html).toContain('upstream.example.com');
     expect(html.indexOf('/api/bill')).toBeLessThan(html.indexOf('/v2/billing'));
-    expect(html).toContain('class="tree last"');
+    expect(html).toContain('indent d1');
+    expect(html).toContain('class="wf"');
   });
 
-  it('links an upstream call back to the route that made it', () => {
+  it('nests the middleware run under the page it let through', () => {
+    const run: ServerCall = { ...route, spanId: 'mw', seq: 5, stage: 'middleware', startedAt: 1, endedAt: 4 };
+    const page: ServerCall = { ...route, middlewareSpanId: 'mw' };
+    const html = renderToStaticMarkup(<ServerView data={data({ calls: [run, page, child] })} onSettings={noop} onCopy={noop} onNotice={noop} />);
+    expect(html).toContain('>Middleware<');
+    expect(html).toContain('indent d1');
+    expect(html).toContain('1 backend · middleware');
+  });
+
+  it('links a backend call back to the page that made it', () => {
     const html = renderToStaticMarkup(
       <ServerCallDetail call={child} related={{ parent: route, children: [] }} onSelectRelated={noop} onClose={noop} onMock={noop} onCopy={noop} />,
     );
-    expect(html).toContain('Made while answering this page call');
+    expect(html).toContain('Part of');
     expect(html).toContain('/api/bill');
   });
 });
@@ -166,11 +196,22 @@ describe('ServerCallDetail', () => {
   it('shows the overview with redacted query values', () => {
     const html = renderToStaticMarkup(<ServerCallDetail call={call} onClose={noop} onMock={noop} onCopy={noop} />);
     expect(html).toContain('/v2/billing');
-    expect(html).toContain('Server → backend');
+    expect(html).toContain('upstream.example.com');
     expect(html).toContain('The server called the backend upstream.example.com (POST /v2/billing) and got “200 · OK” in 250 ms.');
     expect(html).toContain('[REDACTED]');
     expect(html).toContain('Simulate a problem');
     expect(html).toContain('trace-1');
+  });
+
+  it('says plainly when Next answered from its cache', () => {
+    const html = renderToStaticMarkup(<ServerCallDetail call={{ ...call, cache: 'hit' }} onClose={noop} onMock={noop} onCopy={noop} />);
+    expect(html).toContain('from its own cache: the backend was not called this time');
+    expect(html).toContain('from cache');
+  });
+
+  it('keeps Simulate a problem off when the deployment forbids server mocks', () => {
+    const html = renderToStaticMarkup(<ServerCallDetail call={call} onClose={noop} onMock={noop} onCopy={noop} mockingEnabled={false} />);
+    expect(html).toMatch(/disabled=""[^>]*>.*Simulate a problem/);
   });
 });
 

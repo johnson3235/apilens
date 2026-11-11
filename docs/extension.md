@@ -11,19 +11,24 @@ ApiLens is a Chromium Manifest V3 extension with a toolbar popup and DevTools pa
 
 1. Load `apps/browser-extension/dist` unpacked.
 2. Open a normal HTTP(S) page and reload once.
-3. Open DevTools → **ApiLens** → **Start here**.
-4. Start a QA session and perform one journey.
-5. Inspect provenance-labelled requests and traces.
-6. Run **QA Mocks → Repair & test** before mocking.
-7. Stop the session and export evidence.
+3. Open DevTools → **ApiLens**. The first run opens **Start here** and the walkthrough.
+4. Press **Record session** in the header and perform one journey.
+5. Read **Server calls** and **Browser calls**; open **Traces** to see them joined.
+6. Break a call with **Simulate a problem** (server) or **Mock this** (browser), then repeat the step. For browser mocks, run **Mocks → Repair & test** first.
+7. Stop the session, turn the mocks off (**Mocks → Turn all off**) and export evidence.
 
-New users should take the **How it works** walkthrough in the header: fifteen slides covering every section, what it is, how to use it and its honest limitation. Each sidebar section also has an **Explain this section** button that opens the walkthrough at the matching slide. It is a modal dialog with a focus trap, arrow-key navigation, and Escape to close.
+### Layout (1.5.0)
+
+- **Header:** the environment, a status chip each for the browser hooks and the linked server (with the number of pods when there are several), a chip while any mock is on, **Record session** with a running timer, and **?** for help.
+- **Sidebar:** *Test* (Server calls, Browser calls, Mocks, Evidence, Traces) and *Set up* (Connect an app, Settings). Below 1000 px wide it collapses to icons with counts.
+- **Help (?):** *Explain this screen* opens the fifteen-slide walkthrough at the slide for the current screen; *Guided tour*, *Start here* and the *How-to library* live there too. The walkthrough is a modal dialog with a focus trap, arrow-key navigation, and Escape to close.
+- Light and dark themes are under **Settings → Appearance**. In Server calls, `/` focuses the filter and Escape closes the detail.
 
 Restricted browser pages cannot be injected. Page hooks cannot modify service-worker/browser-internal traffic.
 
-## Network view
+## Browser calls
 
-The **Network** view is the browser-side workspace: find a call, read it, break it, extract it.
+The **Browser calls** view is the browser-side workspace: find a call, read it, break it, extract it.
 
 ### Filtering
 
@@ -48,27 +53,29 @@ Selecting a row opens the full detail: summary with failure analysis, request an
 
 ### Mocking a browser call
 
-**Mock this** on a selected call opens the rule editor pre-filled from the real request. Eighteen presets cover service failures, authentication, latency, network conditions and payload defects. Rules are created **disabled** and scoped to the captured path; widening the pattern is a deliberate act. Enable one from **QA Mocks**, then repeat the journey.
+**Mock this** on a selected call opens the rule editor pre-filled from the real request. Eighteen presets cover service failures, authentication, latency, network conditions and payload defects. Rules are created **disabled** and scoped to the captured path; widening the pattern is a deliberate act. Turn one on under **Mocks**, then repeat the journey.
 
 Columns drop by priority as the panel narrows, so a docked DevTools pane stays readable instead of truncating every cell.
 
-## Server API workspace
+## Server calls
 
-The **Server API** view shows what the application does *after* the browser request ends: wrapped App Router handlers and the upstream calls they make, each with request payload, response payload, headers, timing and correlation IDs.
+The **Server calls** view shows what the application does *after* the browser request ends. Each page (or route, or server action) is a group: the Edge middleware run that let it through and the calls that run made, then the backend calls the page made, each tagged **Page**, **Middleware**, **Backend** or **Cache** (answered by Next's fetch cache, no backend call). A timeline bar shows where each call sat inside its page's time, so the call that held the page up is visible at a glance. Filter chips count **Failed**, **Slow**, **Mocked** and **Cached** calls; a matching backend call keeps its page around it. Click a call for what was sent, what came back, headers and correlation IDs; **Simulate a problem** opens the mock editor in place.
 
-It requires an application running [`@apilens/next-sdk`](../sdks/next/README.md) 0.3.0 or later with its control plane enabled (0.4.0 also reports Edge middleware calls, memory use and configuration issues). Configure the endpoint and token under **Settings → Instrumented server**, and use **Test connection** before saving — a wrong URL or token is the usual reason server capture appears to do nothing, and from SDK 0.4.0 the result also lists any setting the server switched off at boot.
+When the list is empty while the server is connected, the view shows the server's own diagnosis from SDK 0.5.0: whether capture is installed, how many requests reached it, and how many were skipped and why (ignored path, no QA session, an origin outside `allowedAppOrigins`, no backend call), each with the config line to copy for the app's developer. With calls listed, a warning chip in the header opens the same card.
+
+It requires an application running [`@apilens/next-sdk`](../sdks/next/README.md) 0.3.0 or later with its control plane enabled (0.4.0 also reports Edge middleware calls, memory use and configuration issues; 0.5.0 adds the capture diagnosis, middleware nesting, cache hits and per-pod cursors). Configure the endpoint and token under **Settings → Instrumented server**, and use **Test connection** before saving — a wrong URL or token is the usual reason server capture appears to do nothing, and from SDK 0.4.0 the result also lists any setting the server switched off at boot.
 
 - **Shared servers.** While a QA session records, the extension tags every request the recording tab sends to the app's host (page loads, RSC, server actions and fetch) with `x-qa-session-id`, through a session-scoped `declarativeNetRequest` rule limited to that tab and that host. The view then defaults to **My session**, showing only this tester's calls; **Everyone** shows all traffic. The rule is removed when the session stops. Turn it off with *Tag my traffic with my QA session* in Settings.
 
 - Polling is driven by the panel, not the service worker, because an MV3 worker is evicted after about 30 seconds of inactivity. Requests are issued from the worker, which holds host permissions and is therefore not subject to page CORS.
-- Each poll uses a `seq` cursor, so only new calls cross the wire. A restarted server changes its process id and the view resets rather than showing stale data.
+- Each poll sends one `seq` cursor per server process, so only new calls cross the wire. Behind a load balancer any pod may answer a poll: each reads its own cursor, calls are merged by span id, and the header shows how many pods answered. A restarted pod is simply a new process. A mock saved to one pod is re-applied to pods that did not receive it, unless one of them holds a later edit.
 - Captured calls also become spans, so **Traces** correlates them with browser requests from the same journey.
 
 ### Server mocks
 
 Selecting a call and choosing **Simulate a problem** opens a three-step editor: which call, what should go wrong (plain-language scenarios that each say what to check on the page), and how many times. The rule is scoped to that path and defaults to **only the next call**, because dev servers are shared; **Save and turn on** applies it, **Save, keep off** stores it disabled, and **Turn all off** disables every rule at once. Technical fields (match type, status code, latency, headers, priority) are under **Developer options**. Presets cover 503, 401, 429, added latency, connection failure, timeout, truncated JSON and empty responses; `passthrough-mutate` calls the real upstream and then edits fields in its JSON response.
 
-Rules are stored in the server process and disappear when it restarts. They run between the route handler and its upstream services, which is the only place a browser mock cannot reach. Never target an endpoint with real financial or order side effects.
+The **Mocks** screen lists browser and server mocks side by side, with one **Turn all off**; the header shows a chip while any mock is on. Rules are stored in the server process and disappear when it restarts. They run between the route handler and its upstream services, which is the only place a browser mock cannot reach. Never target an endpoint with real financial or order side effects.
 
 ### What it does not do
 

@@ -2,7 +2,7 @@
 
 ## Requested change
 
-Integrate **`@apilens/next-sdk@0.4.0`** in CLEAR-APP. Do **not** install the legacy `@apilens/node-sdk`: it is an Express/http adapter, not the App Router adapter.
+Integrate **`@apilens/next-sdk@0.5.0`** in CLEAR-APP. Do **not** install the legacy `@apilens/node-sdk`: it is an Express/http adapter, not the App Router adapter.
 
 The SDK records every incoming Node-runtime request (pages, Server Components including `generateMetadata`, server actions, route handlers) and the backend calls made while handling it, whether through global `fetch` (so `@vfie/core-networking`) or a Node `http`/`https` client such as axios, with no changes to page, layout or route files. Its `/edge` entry adds the calls made by Edge middleware. For each call it records service, method, URL origin/path, status, timing, sanitized headers, errors, parent/child trace IDs and **bounded, redacted request and response payloads**. It can apply **server-side mock rules** to upstream calls, and serves an authenticated **in-app control plane** so a tester can inspect a remote dev deployment that a loopback agent cannot reach.
 
@@ -10,13 +10,13 @@ It does not capture DB queries, background jobs outside a request, Edge *route h
 
 Repository: https://github.com/johnson3235/apilens
 
-Detailed API and integration examples: [Next SDK README](../sdks/next/README.md). The 0.4.0 section there maps each finding of the 0.3.0 CLEAR-APP review to its fix.
+Detailed API and integration examples: [Next SDK README](../sdks/next/README.md). The 0.5.0 section there explains the capture diagnosis (why a connected server shows no calls); the 0.4.0 section maps each finding of the 0.3.0 CLEAR-APP review to its fix.
 
 ## What CLEAR-APP changes
 
 | File | Change |
 | --- | --- |
-| `package.json`, `yarn.lock` (and `vendor/*.tgz` if vendored) | Add `@apilens/next-sdk@0.4.0` |
+| `package.json`, `yarn.lock` (and `vendor/*.tgz` if vendored) | Add `@apilens/next-sdk@0.5.0` |
 | `src/lib/apilens.server.ts` | New singleton, about 25 lines |
 | `src/instrumentation.ts` | Two lines inside the existing `nodejs` branch |
 | `src/middleware.ts` | Wrap the exported middleware with `withApiLens` (one import, one call) |
@@ -31,7 +31,7 @@ No control route file: the SDK serves `/api/__apilens` from its request hook. `n
 
 ## 2. Get the package
 
-Preferred: the `next-sdk-v0.4.0` GitHub Release built by `.github/workflows/next-sdk-release.yml` (tarball plus SHA-256), mirrored into the team's approved artifact registry.
+Preferred: the `next-sdk-v0.5.0` GitHub Release built by `.github/workflows/next-sdk-release.yml` (tarball plus SHA-256), mirrored into the team's approved artifact registry.
 
 Or build it from an ApiLens checkout:
 
@@ -43,10 +43,10 @@ cd sdks/next
 pnpm pack
 ```
 
-Output: `sdks/next/apilens-next-sdk-0.4.0.tgz`. It has no runtime or `workspace:*` dependencies and is not published to npm. If checked-in vendor artifacts are allowed, put it at `CLEAR-APP/vendor/apilens-next-sdk-0.4.0.tgz` and use the project's Yarn version:
+Output: `sdks/next/apilens-next-sdk-0.5.0.tgz`. It has no runtime or `workspace:*` dependencies and is not published to npm. If checked-in vendor artifacts are allowed, put it at `CLEAR-APP/vendor/apilens-next-sdk-0.5.0.tgz` and use the project's Yarn version:
 
 ```powershell
-yarn add file:./vendor/apilens-next-sdk-0.4.0.tgz
+yarn add file:./vendor/apilens-next-sdk-0.5.0.tgz
 ```
 
 Keep the artifact available to CI; do not commit a lockfile pointing at a personal absolute path. Do not publish it anywhere without approval.
@@ -75,7 +75,7 @@ Deploy with `APILENS_ENABLED=true` and a strong `APILENS_CONTROL_TOKEN` (24+ cha
 
 Build/load the extension (1.4.0) with `pnpm --filter @apilens/browser-extension check`, then load `apps/browser-extension/dist` unpacked. In **Settings → Instrumented server**, paste the app origin and the control token and press **Test connection**: it reports the SDK version and any configuration issues. Save.
 
-Each tester then presses **Start QA session** in the CLEAR-APP tab and reloads. While recording, that tab's own requests (page loads, RSC, server actions, fetch) carry `x-qa-session-id`, so **Server API → My session** shows only that tester's calls on the shared server. **Everyone** shows all traffic. Calls appear with Sent and Received tabs, and **Simulate a problem** pushes a rule back to the server.
+Each tester then presses **Record session** in the CLEAR-APP tab and reloads. While recording, that tab's own requests (page loads, RSC, server actions, fetch) carry `x-qa-session-id`, so **Server calls → My session** shows only that tester's calls on the shared server. **Everyone** shows all traffic. Calls appear with Sent and Received tabs, and **Simulate a problem** pushes a rule back to the server.
 
 ### Local machine (loopback agent)
 
@@ -100,7 +100,7 @@ The agent is required only for the loopback path; the control plane replaces it 
 | Missing/short token | App boots and serves normally; `/api/__apilens/health` returns 404; `configIssues` names `control.token` |
 | Page + backend calls | A page call with its JCS/CMS calls nested underneath, matching trace IDs |
 | Middleware | The session / journey / billing-account calls appear under a `clear-app-middleware` call |
-| Payloads | Request and response bodies visible in **Server API**, with truncation/redaction flags; `msisdn` and e-mail redacted |
+| Payloads | Request and response bodies visible in **Server calls**, with truncation/redaction flags; `msisdn` and e-mail redacted |
 | Headers | Diagnostic headers visible; authorization/cookie/token-like values masked |
 | Datadog | No `:8126` calls in the capture; `diagnostics.ignoredOutgoingCalls` increases |
 | Control plane auth | Wrong token returns 401; disabled or expired control plane returns 404 |

@@ -27,9 +27,9 @@ For Chrome/Edge, enable Developer mode on the extensions page and load `apps/bro
 
 1. Open a normal HTTP(S) target page.
 2. Open DevTools → **ApiLens** → **Start here**.
-3. Click **Start QA session** and perform one customer journey.
+3. Click **Record session** and perform one customer journey.
 4. Select a request in Network to inspect it.
-5. Before mocking, open **QA Mocks** and run **Repair & test**.
+5. Before mocking, open **Mocks** and run **Repair & test**.
 6. Stop recording and export evidence.
 
 ## Optional local agent
@@ -50,7 +50,7 @@ pnpm --filter @apilens/demo-nextjs-app dev
 
 Open `http://localhost:3000`, then record the checkout journey.
 
-The Next demo is instrumented with the [Next SDK](../sdks/next/README.md): its `app/api` routes are wrapped, so each incoming route and the upstream calls it makes to the demo API appear in **Server API**. Start it with the control plane on:
+The Next demo is instrumented with the [Next SDK](../sdks/next/README.md): its `app/api` routes are wrapped, so each incoming route and the upstream calls it makes to the demo API appear in **Server calls**. Start it with the control plane on:
 
 ```powershell
 $env:APILENS_ENABLED = 'true'

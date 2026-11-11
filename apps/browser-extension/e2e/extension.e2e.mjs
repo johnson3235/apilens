@@ -158,7 +158,7 @@ try {
 
   check('panel renders', await panel.locator('.qa-shell').count() > 0);
   check('sidebar has every section',
-    (await panel.locator('.nav-item').count()) === 9,
+    (await panel.locator('.nav-item').count()) === 7,
     `${await panel.locator('.nav-item').count()} items`);
 
   // Start a recording session via the service worker so capture is persisted.
@@ -243,7 +243,7 @@ try {
     check('guided tour opens on first run', false, 'dialog not present');
   }
 
-  await panel.locator('.nav-item', { hasText: 'Network' }).first().click();
+  await panel.locator('.nav-item', { hasText: 'Browser calls' }).first().click();
   await panel.waitForTimeout(1200);
 
   const rowCount = await panel.locator('.vrow').count();
