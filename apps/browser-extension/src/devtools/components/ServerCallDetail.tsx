@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { describeStatus, explainServerCall, type ServerCall } from '../../shared/server-control';
+import { describeStatus, explainServerCall, serverCallHost, serverCallKindLabel, type ServerCall } from '../../shared/server-control';
 import { BodyViewer } from './BodyViewer';
+import { Icon } from './Icon';
 
 type DetailTab = 'overview' | 'request' | 'response' | 'headers';
 
@@ -11,62 +12,38 @@ const TABS: Array<{ id: DetailTab; label: string }> = [
   { id: 'headers', label: 'Headers' },
 ];
 
-function FlowLink({ call, onSelect }: { call: ServerCall; onSelect: (call: ServerCall) => void }): JSX.Element {
+type Related = { parent: ServerCall | null; children: ServerCall[]; middleware?: ServerCall | null };
+
+function statusTone(call: ServerCall): string {
+  if (call.statusCode === null) return call.error ? 'err' : 'none';
+  return call.statusCode >= 400 ? 'err' : call.statusCode >= 300 ? 'redirect' : 'ok';
+}
+
+function FlowRow({ call, onSelect }: { call: ServerCall; onSelect: (call: ServerCall) => void }): JSX.Element {
+  const label = serverCallKindLabel(call);
   return (
-    <button type="button" className={`flow-link ${call.status === 'error' ? 'failed' : ''}`} onClick={() => onSelect(call)}>
-      <span className={`dir ${call.kind}`}>{call.kind === 'server' ? 'PAGE' : 'BACKEND'}</span>
-      <span className={`method ${call.method.toLowerCase()}`}>{call.method}</span>
-      <span className="mono path-text">{call.kind === 'client' ? `${call.origin.replace(/^https?:\/\//, '')}${call.path}` : call.path}</span>
-      {call.mockedBy ? <span className="badge mock">mock</span> : null}
-      <span className={`status-pill ${call.status}`}>{call.statusCode ?? (call.error ? 'ERR' : '—')}</span>
-      <span className="muted num">{Math.round(call.durationMs)} ms</span>
+    <button type="button" className="flow-row" onClick={() => onSelect(call)}>
+      <span className={`tag kind-${label.toLowerCase()}`}>{label}</span>
+      <span className={`method-label ${call.method.toLowerCase()}`}>{call.method}</span>
+      <span className="p">{call.kind === 'client' ? `${serverCallHost(call)}${call.path}` : call.path}</span>
+      <span className={`status-code ${statusTone(call)}`}>{call.statusCode ?? (call.error ? 'ERR' : '—')}</span>
+      <span className="dur">{Math.round(call.durationMs)} ms</span>
     </button>
   );
 }
 
-function CallFlow({
-  related,
-  onSelect,
-}: {
-  related: { parent: ServerCall | null; children: ServerCall[] };
-  onSelect: (call: ServerCall) => void;
-}): JSX.Element | null {
-  if (!related.parent && related.children.length === 0) return null;
+function KeyValues({ title, entries, empty }: { title: string; entries: Array<[string, string]>; empty: string }): JSX.Element {
   return (
-    <section className="header-block call-flow">
-      {related.parent ? (
-        <>
-          <h4>Made while answering this page call</h4>
-          <FlowLink call={related.parent} onSelect={onSelect} />
-        </>
-      ) : (
-        <>
-          <h4>Backend calls made to answer it <span className="muted">({related.children.length})</span></h4>
-          {related.children.map((child) => <FlowLink key={child.spanId} call={child} onSelect={onSelect} />)}
-        </>
-      )}
-    </section>
-  );
-}
-
-function HeaderTable({ title, headers }: { title: string; headers: Record<string, string> }): JSX.Element {
-  const entries = Object.entries(headers);
-  return (
-    <section className="header-block">
-      <h4>{title} <span className="muted">({entries.length})</span></h4>
-      {entries.length === 0 ? (
-        <p className="muted">None captured.</p>
-      ) : (
-        <dl className="header-list">
+    <>
+      <div className="kv-title">{title} <span>({entries.length})</span></div>
+      {entries.length === 0 ? <p className="muted">{empty}</p> : (
+        <dl className="kv">
           {entries.map(([name, value]) => (
-            <div key={name}>
-              <dt>{name}</dt>
-              <dd className={value === '[REDACTED]' ? 'redacted' : ''}>{value}</dd>
-            </div>
+            <div key={name}><dt>{name}</dt><dd className={value === '[REDACTED]' ? 'redacted' : ''}>{value}</dd></div>
           ))}
         </dl>
       )}
-    </section>
+    </>
   );
 }
 
@@ -77,36 +54,54 @@ export function ServerCallDetail({
   onClose,
   onMock,
   onCopy,
+  mockingEnabled = true,
+  onOpenMocks,
 }: {
   call: ServerCall;
-  related?: { parent: ServerCall | null; children: ServerCall[] } | null;
+  related?: Related | null;
   onSelectRelated?: (call: ServerCall) => void;
   onClose: () => void;
   onMock: (call: ServerCall) => void;
   onCopy: (value: string) => void;
+  mockingEnabled?: boolean;
+  onOpenMocks?: () => void;
 }): JSX.Element {
   const [tab, setTab] = useState<DetailTab>('overview');
   const query = Object.entries(call.query);
+  const label = serverCallKindLabel(call);
+  const select = onSelectRelated ?? (() => undefined);
+  const page = related?.parent ?? null;
+  const tone = call.mockedBy ? 'mock' : call.cache === 'hit' ? 'cache' : call.status === 'error' ? 'err' : '';
 
   return (
-    <aside className="right server-detail" aria-label="Selected server call">
-      <div className="preview-head">
-        <div className="detail-title">
-          <span className={`method ${call.method.toLowerCase()}`}>{call.method}</span>
-          <strong className="mono">{call.path || call.url}</strong>
+    <aside className="drawer right server-detail" aria-label="Selected server call">
+      <div className="drawer-head preview-head">
+        <div className="title">
+          <div className="line">
+            <span className={`tag kind-${label.toLowerCase()}`}>{label}</span>
+            <span className={`method-label ${call.method.toLowerCase()}`}>{call.method}</span>
+            <strong title={call.url}>{call.path || call.url}</strong>
+          </div>
+          <div className="meta">
+            <span className={`status-code ${statusTone(call)}`}>{describeStatus(call)}</span>
+            <span className="muted">·</span>
+            <span className="dur">{Math.round(call.durationMs)} ms</span>
+            {call.mockedBy ? <span className="tag mock">mocked</span> : null}
+            {call.cache === 'hit' ? <span className="tag cache">from cache</span> : null}
+          </div>
+          {page && onSelectRelated ? (
+            <div className="crumbs">
+              <span>Part of</span>
+              <button onClick={() => select(page)} title={page.url}>{page.stage === 'middleware' ? 'middleware ' : ''}{page.path}</button>
+            </div>
+          ) : null}
         </div>
-        <button className="btn sm" onClick={onClose}>Close</button>
+        <button className="icon-btn" onClick={onClose} aria-label="Close details"><Icon name="close" /></button>
       </div>
 
-      <div className="detail-tabs" role="tablist" aria-label="Server call details">
+      <div className="tabs2 detail-tabs" role="tablist" aria-label="Server call details">
         {TABS.map((item) => (
-          <button
-            key={item.id}
-            role="tab"
-            aria-selected={tab === item.id}
-            className={tab === item.id ? 'active' : ''}
-            onClick={() => setTab(item.id)}
-          >
+          <button key={item.id} role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)}>
             {item.label}
             {item.id === 'request' && call.requestBody ? <i aria-hidden="true">•</i> : null}
             {item.id === 'response' && call.responseBody ? <i aria-hidden="true">•</i> : null}
@@ -114,47 +109,50 @@ export function ServerCallDetail({
         ))}
       </div>
 
-      <div className="scroll pad">
+      <div className="drawer-body">
         {tab === 'overview' ? (
           <>
-            <p className={`call-story ${call.status === 'error' ? 'failed' : ''} ${call.mockedBy ? 'mocked' : ''}`}>{explainServerCall(call)}</p>
+            <p className={`story ${tone}`}>{explainServerCall(call)}</p>
 
-            <div className="eyebrow">Full address</div>
-            <div className="mono wrap">{call.url}</div>
-
-            <div className="preview-grid">
+            <div className="facts">
               <div><span>Result</span><strong className={call.status === 'error' ? 'error-text' : ''}>{describeStatus(call)}</strong></div>
-              <div><span>Duration</span><strong>{Math.round(call.durationMs)} ms</strong></div>
-              <div><span>Type</span><strong>{call.kind === 'server' ? 'Page → this server' : 'Server → backend'}</strong></div>
-              <div><span>Service</span><strong>{call.serviceName}</strong></div>
-              <div><span>Mocked</span><strong className={call.mockedBy ? 'mock-text' : ''}>{call.mockedBy ?? 'No'}</strong></div>
-              <div><span>Body time</span><strong>{call.bodyDurationMs === null ? '—' : `${Math.round(call.bodyDurationMs)} ms`}</strong></div>
+              <div><span>Time</span><strong>{Math.round(call.durationMs)} ms{call.bodyDurationMs !== null ? ` · body ${Math.round(call.bodyDurationMs)} ms` : ''}</strong></div>
+              <div><span>Service</span><strong title={call.serviceName}>{call.serviceName}</strong></div>
+              <div><span>Answered by</span><strong className={call.mockedBy ? 'mock-text' : ''}>{call.mockedBy ? `mock “${call.mockedBy}”` : call.cache === 'hit' ? 'Next cache' : call.kind === 'client' ? serverCallHost(call) : 'this server'}</strong></div>
             </div>
 
-            {call.error ? <div className="error-card">{call.error}</div> : null}
+            {call.error ? <div className="notice err" style={{ margin: '0 0 14px' }}><Icon name="alert" /><div><strong>{call.error}</strong></div></div> : null}
 
-            {related && onSelectRelated ? <CallFlow related={related} onSelect={onSelectRelated} /> : null}
-
-            {query.length ? (
-              <section className="header-block">
-                <h4>Query parameters <span className="muted">({query.length})</span></h4>
-                <dl className="header-list">
-                  {query.map(([name, value]) => (
-                    <div key={name}><dt>{name}</dt><dd className={value === '[REDACTED]' ? 'redacted' : ''}>{value}</dd></div>
-                  ))}
-                </dl>
-              </section>
+            {related?.middleware && onSelectRelated ? (
+              <>
+                <div className="kv-title">Checked first by the middleware</div>
+                <div className="flow-list"><FlowRow call={related.middleware} onSelect={select} /></div>
+              </>
             ) : null}
 
-            <section className="header-block">
-              <h4>Correlation</h4>
-              <dl className="header-list">
-                <div><dt>trace</dt><dd className="mono">{call.traceId}</dd></div>
-                <div><dt>span</dt><dd className="mono">{call.spanId}</dd></div>
-                <div><dt>parent</dt><dd className="mono">{call.parentSpanId ?? '—'}</dd></div>
-                <div><dt>session</dt><dd className="mono">{call.sessionId}</dd></div>
-              </dl>
-            </section>
+            {related && related.children.length && onSelectRelated ? (
+              <>
+                <div className="kv-title">{call.stage === 'middleware' ? 'Calls the middleware made' : 'Backend calls made to answer it'} ({related.children.length})</div>
+                <div className="flow-list">{related.children.map((child) => <FlowRow key={child.spanId} call={child} onSelect={select} />)}</div>
+              </>
+            ) : null}
+
+            <div className="kv-title">Full address</div>
+            <div className="mono wrap" style={{ fontSize: 11.5 }}>{call.url}</div>
+
+            {query.length ? <KeyValues title="Query parameters" entries={query} empty="" /> : null}
+
+            <KeyValues
+              title="Correlation"
+              entries={[
+                ['trace', call.traceId],
+                ['span', call.spanId],
+                ['parent', call.parentSpanId ?? '—'],
+                ['session', call.sessionId],
+                ...(call.middlewareSpanId ? [['middleware', call.middlewareSpanId] as [string, string]] : []),
+              ]}
+              empty=""
+            />
           </>
         ) : null}
 
@@ -180,16 +178,24 @@ export function ServerCallDetail({
 
         {tab === 'headers' ? (
           <>
-            <HeaderTable title="Request headers" headers={call.requestHeaders} />
-            <HeaderTable title="Response headers" headers={call.responseHeaders} />
-            <p className="muted">Credential-like headers are replaced on the server before capture, so they never reach this panel.</p>
+            <KeyValues title="Request headers" entries={Object.entries(call.requestHeaders)} empty="None captured." />
+            <KeyValues title="Response headers" entries={Object.entries(call.responseHeaders)} empty="None captured." />
+            <p className="muted" style={{ marginTop: 12 }}>Credential-like headers are replaced on the server before capture, so they never reach this panel.</p>
           </>
         ) : null}
       </div>
 
-      <div className="detail-actions sticky">
-        <button className="btn primary" onClick={() => onMock(call)}>Simulate a problem</button>
-        <button className="btn" onClick={() => onCopy(call.url)}>Copy URL</button>
+      <div className="drawer-foot detail-actions">
+        <button
+          className="btn primary"
+          onClick={() => onMock(call)}
+          disabled={!mockingEnabled}
+          title={mockingEnabled ? 'Make this call fail or answer differently, then repeat the step in the app' : 'Server mocks are disabled for this deployment'}
+        >
+          <Icon name="bolt" size={13} />Simulate a problem
+        </button>
+        {call.mockedBy && onOpenMocks ? <button className="btn" onClick={onOpenMocks}>Manage mocks</button> : null}
+        <button className="btn" onClick={() => onCopy(call.url)}><Icon name="copy" size={13} />Copy URL</button>
         <button className="btn" onClick={() => onCopy(JSON.stringify(call, null, 2))}>Copy as JSON</button>
       </div>
     </aside>

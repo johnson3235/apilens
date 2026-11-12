@@ -21,10 +21,11 @@ import {
 } from './outgoing';
 import { applyFieldMutations, buildMockResponse, headerSafe, MockNetworkError, sanitizeRule, selectMockRule } from './mocks';
 import { redactHeaders, safeUrlParts } from './redaction';
-import { CONTROL_PROTOCOL_VERSION } from './types';
+import { CONTROL_PROTOCOL_VERSION, MIDDLEWARE_HEADER } from './types';
 import type {
   AutoInstrumentOptions,
   CapturedBody,
+  CaptureStats,
   ConfigIssue,
   ControlHealth,
   ControlPlaneOptions,
@@ -38,7 +39,7 @@ export * from './types';
 export { DEFAULT_TEXT_CONTENT_TYPES } from './bodies';
 export { MIN_TOKEN_LENGTH } from './control';
 
-export const SDK_VERSION = '0.4.0';
+export const SDK_VERSION = '0.5.0';
 
 /**
  * Session id used when `captureWithoutSession` is on.
@@ -66,10 +67,20 @@ interface Context {
   auto?: AutoRequest;
   /** Shared by every context opened for one incoming request, including nested wrapRoute/traceRender. */
   lifecycle?: { finished: boolean };
+  /** The Edge middleware run that let this request through. */
+  middlewareSpanId?: string | null;
 }
 
 interface AutoRequest {
   method: string; url: string; headers: Headers; parentSpanId: string | null;
+  /**
+   * The live `req.headers`. Next applies a middleware's request-header
+   * overrides to this object after the hook has run, so the middleware link
+   * is read from here when calls are recorded.
+   */
+  live: IncomingMessage['headers'];
+  /** A W3C traceparent wins over the middleware's trace. */
+  tracedByParent: boolean;
   /** Outgoing calls made while handling it; requests with none are usually noise. */
   outbound: number;
   /** A `wrapRoute`/`traceRender` inside it records the call instead, with richer detail. */
@@ -81,6 +92,23 @@ interface AutoRequest {
 const id = (bytes: number) => randomBytes(bytes).toString('hex');
 const safeId = (value: string | null): string | undefined => value && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value) ? value : undefined;
 
+function parseMiddlewareLink(value: string | null): { traceId: string; spanId: string } | null {
+  const link = /^([a-f0-9]{32})-([a-f0-9]{16})$/.exec(value ?? '');
+  return link ? { traceId: link[1]!, spanId: link[2]! } : null;
+}
+/**
+ * Continues the trace of the Edge middleware run that let this request
+ * through. Middleware runs before the page renders, so by the time any call
+ * of the page is recorded its override headers are in place.
+ */
+function adoptMiddlewareLink(ctx: Context): void {
+  if (!ctx.auto || ctx.middlewareSpanId) return;
+  const raw = ctx.auto.live[MIDDLEWARE_HEADER];
+  const link = parseMiddlewareLink(typeof raw === 'string' ? raw : null);
+  if (!link) return;
+  ctx.middlewareSpanId = link.spanId;
+  if (!ctx.auto.tracedByParent) ctx.traceId = link.traceId;
+}
 function parseTraceparent(value: string | null): { traceId: string; spanId: string } | null {
   const parent = /^00-([a-f0-9]{32})-([a-f0-9]{16})-([a-f0-9]{2})$/.exec(value ?? '');
   return parent && !/^0+$/.test(parent[1]!) && !/^0+$/.test(parent[2]!) ? { traceId: parent[1]!, spanId: parent[2]! } : null;
@@ -264,6 +292,22 @@ export class ApiLensNextSDK {
   private readonly issues: ConfigIssue[] = [];
   private lateCallsSkipped = 0;
   private ignoredOutgoingCalls = 0;
+  /** Outermost fetch layer, above Next's own patch, that notices cache hits. */
+  private cacheLayer: { outer: typeof fetch; inner: () => typeof fetch } | null = null;
+  /** Origins the extension reached the control plane through; requests there are this app's own. */
+  private readonly learnedOrigins = new Set<string>();
+  private readonly stats: Omit<CaptureStats, 'learnedOrigins'> = {
+    installed: false,
+    installedBy: null,
+    requestsSeen: 0,
+    requestsRecorded: 0,
+    skipped: { ignoredPath: 0, noSession: 0, originNotAllowed: 0, noBackendCall: 0 },
+    lastRejectedOrigin: null,
+    backendCalls: 0,
+    cacheHits: 0,
+    middlewareRuns: 0,
+    lastRequestAt: null,
+  };
 
   /** Distinguishes a restarted server from an idle one in the extension. */
   readonly processId = id(8);
@@ -395,6 +439,7 @@ export class ApiLensNextSDK {
       ruleCount: this.rules.length,
       activeRuleCount: this.rules.filter((rule) => rule.enabled).length,
       agentDelivery: { ...this.reporter.diagnostics },
+      capture: { ...this.stats, skipped: { ...this.stats.skipped }, learnedOrigins: [...this.learnedOrigins] },
     };
   }
 
@@ -430,8 +475,37 @@ export class ApiLensNextSDK {
       });
     }
     const response = await this.control(request);
-    if (response.status < 400) this.servedControl = true;
+    if (response.status < 400) {
+      this.servedControl = true;
+      this.learnOrigin(request);
+      if (this.enabled && !this.stats.installed && !this.controlOptions?.relay) {
+        // register() never ran (on Next 14, usually a missing
+        // experimental.instrumentationHook), so capture starts from here.
+        this.installFetch('first-connection');
+        this.issues.push({
+          setting: 'instrumentation',
+          problem: 'install() was not called at boot, so ApiLens installed itself when the extension first connected and earlier requests were missed. Call apiLens.install() from register() in instrumentation.ts (Next 14: experimental.instrumentationHook: true).',
+        });
+      }
+    }
     return response;
+  }
+
+  /**
+   * The extension reached the control plane through this origin with a valid
+   * token, so pages served there are this application's own, even when the
+   * ingress rewrites the host away from `allowedAppOrigins`.
+   */
+  private learnOrigin(request: Request): void {
+    if (this.learnedOrigins.size >= 20) return;
+    const candidates = [request.url];
+    try { candidates.push(renderUrl(new URL(request.url).pathname, request.headers)); } catch { /* request.url alone */ }
+    for (const candidate of candidates) {
+      try {
+        const origin = new URL(candidate).origin;
+        if (origin !== 'null' && !this.allowed.has(origin)) this.learnedOrigins.add(origin);
+      } catch { /* not a URL */ }
+    }
   }
 
   /** Ready-made App Router exports for the control route file. */
@@ -499,8 +573,12 @@ export class ApiLensNextSDK {
   }
 
   /** Same as `install()`; kept for 0.2 integrations, which already call it at boot. */
-  installFetch(): void {
+  installFetch(by: 'boot' | 'first-connection' = 'boot'): void {
     if (!this.enabled) return;
+    if (!this.stats.installed) {
+      this.stats.installed = true;
+      this.stats.installedBy = by;
+    }
     if ((this.auto || (this.control && !this.controlOptions?.relay)) && !this.requestHook) {
       this.requestHook = (req, res, dispatch) => this.onIncoming(req, res, dispatch);
       setRequestHook(this.requestHook);
@@ -509,6 +587,7 @@ export class ApiLensNextSDK {
       this.outgoingHook = (call, original) => this.onOutgoing(call, original);
       setOutgoingHook(this.outgoingHook);
     }
+    if (this.cacheLayer && globalThis.fetch === this.cacheLayer.outer) return;
     // Next wraps fetch once and marks it; wrapping on top of that again would
     // make Next wrap again, growing the chain on every request.
     if (globalThis.fetch === this.wrapper || (this.wrapper && isNextPatched(globalThis.fetch))) return;
@@ -521,7 +600,86 @@ export class ApiLensNextSDK {
       if (sdk.skipOutgoing(ctx, fetchUrl(input))) return downstream(input, init);
       return sdk.insideFetch.run(true, () => sdk.instrumentedFetch(downstream, ctx, input, init));
     };
-    globalThis.fetch = this.wrapper;
+    if (!this.installCacheLayer(this.wrapper)) globalThis.fetch = this.wrapper;
+  }
+
+  /**
+   * Puts a layer above whatever later replaces `globalThis.fetch`.
+   *
+   * Next (and React's request deduplication) patch fetch after boot and answer
+   * cached calls themselves, so the wrapper below them never sees those. The
+   * global becomes an accessor: assignments land underneath this layer, which
+   * calls through them and records a call as a cache hit when it came back
+   * without ever reaching the network wrapper. When the patch calls down to
+   * the fetch it captured (this layer), the call goes straight to `base`.
+   */
+  private installCacheLayer(base: typeof fetch): boolean {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+    if (!descriptor?.configurable || !('value' in descriptor)) return false;
+    const sdk = this;
+    const passing = new AsyncLocalStorage<{ reached: boolean }>();
+    let inner: typeof fetch = base;
+    const target = (() => undefined) as unknown as typeof fetch;
+    const outer = new Proxy(target, {
+      apply(_target, thisArg, args: [RequestInfo | URL, RequestInit | undefined]) {
+        const below = passing.getStore();
+        if (below) {
+          below.reached = true;
+          return base.apply(thisArg, args);
+        }
+        if (inner === base || sdk.stopped) return base.apply(thisArg, args);
+        const state = { reached: false };
+        const startedAt = Date.now();
+        const result = passing.run(state, () => inner.apply(thisArg, args));
+        const ctx = sdk.contexts.getStore();
+        if (!ctx || !sdk.enabled || sdk.insideFetch.getStore()) return result;
+        return Promise.resolve(result).then((response) => {
+          if (!state.reached && response instanceof Response) {
+            try { sdk.recordCacheHit(ctx, args[0], args[1], response, startedAt); } catch { /* capture is best-effort */ }
+          }
+          return response;
+        });
+      },
+      // Next reads and writes markers such as `__nextPatched` on the global fetch.
+      get: (_target, property) => Reflect.get(inner, property),
+      set: (_target, property, value) => Reflect.set(inner, property, value),
+      has: (_target, property) => Reflect.has(inner, property),
+    });
+    try {
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        enumerable: descriptor.enumerable ?? true,
+        get: () => outer,
+        set: (value: typeof fetch) => {
+          // Code that saves and restores the global must not put this layer under itself.
+          if (typeof value === 'function' && value !== outer) inner = value;
+        },
+      });
+    } catch {
+      return false;
+    }
+    this.cacheLayer = { outer, inner: () => inner };
+    return true;
+  }
+
+  /** A fetch Next answered from its cache: no backend call happened, but the page got this data. */
+  private recordCacheHit(ctx: Context, input: RequestInfo | URL, init: RequestInit | undefined, response: Response, startedAt: number): void {
+    const url = fetchUrl(input);
+    if (this.skipOutgoing(ctx, url)) return;
+    const requestInput = input instanceof Request ? input : null;
+    const method = (init?.method ?? requestInput?.method ?? 'GET').toUpperCase();
+    const headers = new Headers(init?.headers ?? requestInput?.headers);
+    if (ctx.auto) ctx.auto.outbound += 1;
+    this.stats.cacheHits += 1;
+    const requestCapture = this.bodyCapture.request && init?.body !== undefined && init?.body !== null
+      ? captureInitBody(init.body, headers.get('content-type'), this.bodyCapture)
+      : null;
+    const responseCapture = this.bodyCapture.response ? captureMessageBody(response, this.bodyCapture) : null;
+    this.track(this.finishRecord({
+      ctx, spanId: id(8), parentSpanId: ctx.spanId, kind: 'client', method, url, startedAt,
+      statusCode: response.status, requestHeaders: headers, responseHeaders: response.headers,
+      error: null, requestCapture, responseCapture, mockedBy: null, skipped: [], cache: 'hit',
+    }));
   }
 
   /**
@@ -570,29 +728,47 @@ export class ApiLensNextSDK {
   private autoContext(req: IncomingMessage): Context | null {
     const rawPath = req.url ?? '/';
     const pathname = rawPath.split('?')[0]!;
-    if (ALWAYS_IGNORED.test(pathname) || this.isControlPath(pathname) || this.auto?.ignorePaths?.some((rule) =>
-      typeof rule === 'string' ? pathname.startsWith(rule) : rule.test(pathname))) return null;
+    if (ALWAYS_IGNORED.test(pathname) || this.isControlPath(pathname)) return null;
+    this.stats.requestsSeen += 1;
+    this.stats.lastRequestAt = Date.now();
+    if (this.auto?.ignorePaths?.some((rule) => typeof rule === 'string' ? pathname.startsWith(rule) : rule.test(pathname))) {
+      this.stats.skipped.ignoredPath += 1;
+      return null;
+    }
 
     const headers = nodeHeaders(req.headers);
     const sessionId = safeId(headers.get('x-qa-session-id')) ?? (this.options.captureWithoutSession ? AMBIENT_SESSION_ID : undefined);
-    if (!sessionId) return null;
+    if (!sessionId) {
+      this.stats.skipped.noSession += 1;
+      return null;
+    }
 
     const parsed = new URL(renderUrl(rawPath, headers));
     parsed.searchParams.delete('_rsc'); // Next's cache-buster, not part of the page address.
     const url = parsed.toString();
-    if (!this.originAllowed(url)) return null;
+    if (!this.originAllowed(url)) {
+      this.stats.skipped.originNotAllowed += 1;
+      this.stats.lastRejectedOrigin = parsed.origin;
+      return null;
+    }
     this.installFetch();
 
     const parent = parseTraceparent(headers.get('traceparent'));
-    return {
+    const ctx: Context = {
       sessionId,
       scenarioId: safeId(headers.get('x-test-scenario-id')),
       traceId: parent?.traceId ?? id(16),
       spanId: id(8),
       relayTo: this.relayTarget(url),
-      auto: { method: (req.method ?? 'GET').toUpperCase(), url, headers, parentSpanId: parent?.spanId ?? null, outbound: 0, claimed: false },
+      auto: {
+        method: (req.method ?? 'GET').toUpperCase(), url, headers, parentSpanId: parent?.spanId ?? null, outbound: 0, claimed: false,
+        live: req.headers, tracedByParent: parent !== null,
+      },
       lifecycle: { finished: false },
+      middlewareSpanId: null,
     };
+    adoptMiddlewareLink(ctx);
+    return ctx;
   }
 
   /** Records the request once the response is done, off the request's critical path. */
@@ -610,7 +786,15 @@ export class ApiLensNextSDK {
       settled = true;
       if (ctx.lifecycle) ctx.lifecycle.finished = true;
       const statusCode = aborted && !res.headersSent ? null : res.statusCode;
-      if (auto.claimed || !this.worthRecording(auto, statusCode, aborted)) return;
+      if (auto.claimed) {
+        this.stats.requestsRecorded += 1;
+        return;
+      }
+      if (!this.worthRecording(auto, statusCode, aborted)) {
+        this.stats.skipped.noBackendCall += 1;
+        return;
+      }
+      this.stats.requestsRecorded += 1;
       const responseHeaders = sentHeaders();
       this.track(this.finishRecord({
         ctx, spanId: ctx.spanId, parentSpanId: auto.parentSpanId, kind: 'server', method: auto.method, url: auto.url, startedAt,
@@ -863,11 +1047,12 @@ export class ApiLensNextSDK {
       this.installFetch();
       const outer = this.contexts.getStore();
       if (outer?.auto) outer.auto.claimed = true;
+      if (outer) adoptMiddlewareLink(outer);
 
       const validParent = parseTraceparent(request.headers.get('traceparent'));
       const relayTo = this.relayTarget(request.url);
       if (relayTo) await this.pullRules(relayTo);
-      const ctx: Context = { sessionId, scenarioId: safeId(request.headers.get('x-test-scenario-id')), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo, lifecycle: outer?.lifecycle };
+      const ctx: Context = { sessionId, scenarioId: safeId(request.headers.get('x-test-scenario-id')), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo, lifecycle: outer?.lifecycle, middlewareSpanId: outer?.middlewareSpanId ?? null };
       const startedAt = Date.now();
       const method = request.method.toUpperCase();
 
@@ -943,11 +1128,12 @@ export class ApiLensNextSDK {
     if (!this.originAllowed(url)) return render();
     this.installFetch();
     if (outer?.auto) outer.auto.claimed = true;
+    if (outer) adoptMiddlewareLink(outer);
 
     const validParent = parseTraceparent(incoming?.get('traceparent') ?? null);
     const relayTo = this.relayTarget(url);
     if (relayTo) await this.pullRules(relayTo);
-    const ctx: Context = { sessionId, scenarioId: safeId(incoming?.get('x-test-scenario-id') ?? null), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo, lifecycle: outer?.lifecycle };
+    const ctx: Context = { sessionId, scenarioId: safeId(incoming?.get('x-test-scenario-id') ?? null), traceId: validParent?.traceId ?? outer?.traceId ?? id(16), spanId: outer?.auto ? outer.spanId : id(8), relayTo, lifecycle: outer?.lifecycle, middlewareSpanId: outer?.middlewareSpanId ?? null };
     const method = (options.method ?? 'GET').toUpperCase();
     const startedAt = Date.now();
 
@@ -1004,7 +1190,12 @@ export class ApiLensNextSDK {
 
   private originAllowed(url: string): boolean {
     if (this.allowAnyOrigin) return true;
-    try { return this.allowed.has(new URL(url).origin); } catch { return false; }
+    try {
+      const origin = new URL(url).origin;
+      return this.allowed.has(origin) || this.learnedOrigins.has(origin);
+    } catch {
+      return false;
+    }
   }
 
   private async decide(
@@ -1164,9 +1355,11 @@ export class ApiLensNextSDK {
     method: string; url: string; startedAt: number; statusCode: number | null;
     requestHeaders: Headers; responseHeaders: Headers | null; error: string | null;
     requestCapture: Promise<CaptureOutcome> | null; responseCapture: Promise<CaptureOutcome> | null;
-    mockedBy: string | null; skipped: MockSkipReason[];
+    mockedBy: string | null; skipped: MockSkipReason[]; cache?: 'hit';
   }): Promise<void> {
     if (!this.enabled) return;
+    adoptMiddlewareLink(input.ctx);
+    if (input.kind === 'client' && !input.cache) this.stats.backendCalls += 1;
     const endedAt = Date.now();
     const [request, response] = await Promise.all([
       settleCapture(input.requestCapture, 5_000),
@@ -1206,6 +1399,8 @@ export class ApiLensNextSDK {
       responseBodyOmitted: response.omitted,
       error: input.error,
       mockedBy: input.mockedBy,
+      ...(input.cache ? { cache: input.cache } : {}),
+      ...(input.kind === 'server' && input.ctx.middlewareSpanId ? { middlewareSpanId: input.ctx.middlewareSpanId } : {}),
     };
     if (input.ctx.relayTo) await this.relayPost(input.ctx.relayTo, 'ingest', { calls: [call] });
     else this.buffer.add(call);
@@ -1293,6 +1488,7 @@ export class ApiLensNextSDK {
       if (call) {
         this.buffer.add(call);
         kept += 1;
+        if (call.stage === 'middleware' && call.kind === 'server') this.stats.middlewareRuns += 1;
       }
     }
     return kept;
@@ -1311,7 +1507,17 @@ export class ApiLensNextSDK {
     this.requestHook = null;
     if (this.outgoingHook) clearOutgoingHook(this.outgoingHook);
     this.outgoingHook = null;
-    if (globalThis.fetch === this.wrapper && this.downstream) globalThis.fetch = this.downstream;
+    if (this.cacheLayer && globalThis.fetch === this.cacheLayer.outer) {
+      // Back to a plain property. Whatever Next installed stays, still calling down through the (now inert) layers.
+      const inner = this.cacheLayer.inner();
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true, enumerable: true, writable: true,
+        value: inner === this.wrapper && this.downstream ? this.downstream : inner,
+      });
+    } else if (globalThis.fetch === this.wrapper && this.downstream) {
+      globalThis.fetch = this.downstream;
+    }
+    this.cacheLayer = null;
     await this.reporter.shutdown();
   }
 }
@@ -1362,6 +1568,9 @@ function relayedCall(raw: unknown): Omit<ServerCall, 'seq'> | null {
     responseBodyOmitted: text('responseBodyOmitted', 500),
     error: text('error', 500),
     mockedBy: text('mockedBy', 500),
+    ...(value.stage === 'middleware' ? { stage: 'middleware' as const } : {}),
+    ...(text('middlewareSpanId', 64) ? { middlewareSpanId: text('middlewareSpanId', 64) } : {}),
+    ...(value.cache === 'hit' ? { cache: 'hit' as const } : {}),
   };
 }
 

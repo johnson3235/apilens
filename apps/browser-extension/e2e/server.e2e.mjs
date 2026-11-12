@@ -113,7 +113,7 @@ try {
     await panel.keyboard.press('Escape');
     await panel.waitForSelector('.tour-dialog', { state: 'detached' });
   }
-  await panel.locator('.nav-item', { hasText: 'Server API' }).click();
+  await panel.locator('.nav-item', { hasText: 'Server calls' }).click();
   await panel.waitForSelector('.server-view .vrow', { timeout: 15_000 });
   await panel.waitForTimeout(2_500);
   await shot(panel, 'server-calls');
@@ -150,6 +150,9 @@ try {
   await panel.getByRole('radio', { name: /Service is down/ }).click();
   await shot(panel, 'mock-editor');
   await panel.getByRole('button', { name: 'Save and turn on' }).click();
+  await panel.waitForSelector('.server-view .drawer[aria-label="Simulate a problem"]', { state: 'detached', timeout: 10_000 });
+  check('active mock is flagged in the header', await panel.locator('.topbar .chip.mock').count() === 1);
+  await panel.locator('.nav-item', { hasText: 'Mocks' }).click();
   await panel.waitForSelector('.rule-card .switch.on', { timeout: 10_000 });
   await shot(panel, 'mock-enabled');
 
@@ -165,7 +168,7 @@ try {
   const mockedCall = after.find((call) => call.path === '/api/payments' && call.mockedBy);
   check('mocked call is marked in the capture', Boolean(mockedCall), mockedCall ? `mockedBy ${mockedCall.mockedBy}` : '');
 
-  await panel.getByRole('tab', { name: /^Calls/ }).click();
+  await panel.locator('.nav-item', { hasText: 'Server calls' }).click();
   await panel.waitForTimeout(2_500);
   await shot(panel, 'server-calls-mocked');
 
@@ -188,7 +191,7 @@ try {
   check('recording tab tags its requests with the QA session', Boolean(sessionId) && mine.length > 0 && mine.length === tagged.length,
     `${mine.length}/${tagged.length} server calls carried ${sessionId ?? 'no session'}: ${mine.map((call) => `${call.method} ${call.path}`).join(', ')}`);
 
-  await panel.locator('.nav-item', { hasText: 'Server API' }).click();
+  await panel.locator('.nav-item', { hasText: 'Server calls' }).click();
   await panel.waitForTimeout(2_500);
   check('Server API offers My session / Everyone', await panel.getByRole('button', { name: 'My session' }).count() === 1);
   await shot(panel, 'server-calls-my-session');

@@ -74,7 +74,7 @@ function EmptyExplanation({
         <p>
           {recording
             ? 'Use the application in the inspected tab. Calls appear here the moment the page makes them.'
-            : 'Press “Start QA session” in the header, reload the inspected page, then perform the journey you want to test.'}
+            : 'Press “Record session” in the header, reload the inspected page, then perform the journey you want to test.'}
         </p>
       </div>
     );
@@ -265,7 +265,7 @@ export function NetworkView({
       <div className="view-header">
         <div>
           <span className="overline">LIVE BROWSER CAPTURE</span>
-          <h1>Network calls</h1>
+          <h1>Browser calls</h1>
           <p>Every request the page makes — inspect the payload, mock the failure, extract the evidence.</p>
         </div>
         <div className="view-actions">

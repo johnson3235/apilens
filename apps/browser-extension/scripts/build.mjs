@@ -28,6 +28,7 @@ const staticFiles = [
   ['src/devtools/devtools.html', 'devtools/devtools.html'],
   ['src/devtools/panel.html', 'devtools/panel.html'],
   ['src/styles/panel.css', 'devtools/panel.css'],
+  ['src/styles/design.css', 'devtools/design.css'],
   ['src/popup/popup.html', 'popup/popup.html'],
   ['src/styles/panel.css', 'popup/panel.css'],
   ['src/manifest.json', 'manifest.json'],

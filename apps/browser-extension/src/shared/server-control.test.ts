@@ -128,7 +128,30 @@ describe('groupCallsByRoute', () => {
 
   it('finds the parent route and the children of a route', () => {
     const all = [route, customer, payment, earlier];
-    expect(relatedServerCalls(payment, all)).toEqual({ parent: route, children: [] });
-    expect(relatedServerCalls(route, all)).toEqual({ parent: null, children: [customer, payment] });
+    expect(relatedServerCalls(payment, all)).toEqual({ parent: route, children: [], middleware: null });
+    expect(relatedServerCalls(route, all)).toEqual({ parent: null, children: [customer, payment], middleware: null });
+  });
+
+  it('nests the middleware run, and the calls it made, under the page it let through', () => {
+    const run: ServerCall = { ...route, seq: 20, spanId: 'mw-run', traceId: 'trace-p', stage: 'middleware', path: '/myaccount/billing', startedAt: 90 };
+    const session: ServerCall = { ...customer, seq: 21, spanId: 'mw-session', traceId: 'trace-p', parentSpanId: 'mw-run', stage: 'middleware', path: '/session', startedAt: 95 };
+    const page: ServerCall = { ...route, seq: 22, spanId: 'page', traceId: 'trace-p', middlewareSpanId: 'mw-run', path: '/myaccount/billing', startedAt: 100 };
+    const balance: ServerCall = { ...customer, seq: 23, spanId: 'balance', traceId: 'trace-p', parentSpanId: 'page', path: '/balance', startedAt: 110 };
+
+    const rows = groupCallsByRoute([balance, session, page, run]);
+    expect(rows.map((row) => [row.call.spanId, row.depth, row.childCount, row.last])).toEqual([
+      ['page', 0, 3, false],
+      ['mw-run', 1, 1, false],
+      ['mw-session', 2, 0, true],
+      ['balance', 1, 0, true],
+    ]);
+    expect(relatedServerCalls(page, [run, session, page, balance]).middleware).toBe(run);
+    expect(relatedServerCalls(run, [run, session, page, balance]).parent).toBe(page);
+  });
+
+  it('keeps a middleware run that redirected (no page behind it) at the top', () => {
+    const run: ServerCall = { ...route, seq: 30, spanId: 'mw-only', traceId: 'trace-r', stage: 'middleware', statusCode: 307 };
+    const session: ServerCall = { ...customer, seq: 31, spanId: 'mw-s', traceId: 'trace-r', parentSpanId: 'mw-only', stage: 'middleware' };
+    expect(groupCallsByRoute([run, session]).map((row) => [row.call.spanId, row.depth])).toEqual([['mw-only', 0], ['mw-s', 1]]);
   });
 });

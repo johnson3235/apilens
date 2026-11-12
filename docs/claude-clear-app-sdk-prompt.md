@@ -1,9 +1,9 @@
 # Claude prompt: integrate ApiLens into CLEAR-APP
 
-Copy the complete block below into Claude while working with the CLEAR-APP source checkout. Give Claude access to the ApiLens checkout or the `apilens-next-sdk-0.4.0.tgz` release artifact too.
+Copy the complete block below into Claude while working with the CLEAR-APP source checkout. Give Claude access to the ApiLens checkout or the `apilens-next-sdk-0.5.0.tgz` release artifact too.
 
 ```text
-Integrate @apilens/next-sdk@0.4.0 into CLEAR-APP so ApiLens shows the SERVER
+Integrate @apilens/next-sdk@0.5.0 into CLEAR-APP so ApiLens shows the SERVER
 side of every journey (pages, Server Components, server actions, route
 handlers, Edge middleware, and the JCS/CMS/auth calls each one makes, with
 redacted request and response bodies), not only the browser's traffic.
@@ -11,7 +11,7 @@ Do NOT use @apilens/node-sdk (legacy Express SDK) or any 0.1-0.3 instructions.
 
 ApiLens repository: https://github.com/johnson3235/apilens
 Authoritative sources, read them fully before writing code:
-- sdks/next/README.md (API, the 0.4.0 review-fix table, steps 1, 2 and 3d)
+- sdks/next/README.md (API, the 0.5.0 review-fix table, steps 1, 2 and 3d)
 - docs/frontend-sdk-setup.md (CLEAR-APP footprint + acceptance table)
 - sdks/next/src/index.ts, src/edge.ts, src/types.ts (real exports and options)
 - examples/clear-demo-app (working reference: lib/apilens.ts,
@@ -35,13 +35,13 @@ Do not invent exports, options or npm publication.
   or .env.example. No commit, push or PR unless I ask.
 
 2. Install the package
-- Use the next-sdk-v0.4.0 GitHub Release tarball (check its SHA-256) or build
+- Use the next-sdk-v0.5.0 GitHub Release tarball (check its SHA-256) or build
   it: pnpm install --frozen-lockfile; pnpm --filter @apilens/next-sdk build;
   pnpm --filter @apilens/next-sdk test; cd sdks/next; pnpm pack.
-- Verify package.json says 0.4.0 and that both '@apilens/next-sdk' and
+- Verify package.json says 0.5.0 and that both '@apilens/next-sdk' and
   '@apilens/next-sdk/edge' resolve.
 - Install with CLEAR-APP's own Yarn from the approved artifact location
-  (vendor/apilens-next-sdk-0.4.0.tgz if vendoring is allowed, else ask).
+  (vendor/apilens-next-sdk-0.5.0.tgz if vendoring is allowed, else ask).
   Never commit a lockfile entry pointing at a personal absolute path.
 
 3. Server-only singleton: src/lib/apilens.server.ts
@@ -60,7 +60,7 @@ Do not invent exports, options or npm publication.
              expiresAt: process.env.APILENS_CONTROL_EXPIRES_AT }
   autoInstrument: { ignorePaths: ['/api/check-session'] }
   allowRouteMocks: false
-- Pass the token as is: 0.4.0 never throws on a missing or short token, it
+- Pass the token as is: 0.5.0 never throws on a missing or short token, it
   switches the control plane off and reports it in diagnostics.configIssues.
   Do not add your own length gate.
 - Datadog agent traffic (:8126, DD_AGENT_HOST, DD_TRACE_AGENT_URL) is ignored
@@ -97,13 +97,18 @@ Do not invent exports, options or npm publication.
 - Run CLEAR-APP locally with APILENS_ENABLED=true and a generated 24+ char
   token in an untracked .env.local or the shell only. Then:
   curl -H "Authorization: Bearer $TOKEN" http://localhost:<port>/api/__apilens/health
-  -> sdkVersion 0.4.0, configIssues [].
+  -> sdkVersion 0.5.0, configIssues [], capture.installed true with
+     installedBy "boot" (not "first-connection": that means register() did
+     not run). After loading pages, capture.requestsRecorded > 0 and every
+     skipped.* counter explained; name any lastRejectedOrigin.
   Load a session-gated page and an /api route, then GET /api/__apilens/calls:
   expect page call + nested JCS/CMS calls with bodies, a clear-app-middleware
   call with its session/journey calls, msisdn/e-mail redacted, no :8126 calls.
-- Extension 1.4.0: Settings -> Instrumented server -> origin + token ->
-  Test connection (shows configIssues) -> Start QA session -> reload ->
-  Server API -> My session shows only your calls.
+- Extension 1.5.0: Settings -> Instrumented server -> origin + token ->
+  Test connection (shows configIssues) -> Record session -> reload ->
+  Server calls -> My session shows only your calls, each page with its
+  middleware run and backend calls nested under it. If the list stays
+  empty, report what its diagnosis card says.
 - Server mock on a harmless GET only: one 'once' rule -> call marked mocked,
   appliedCount 1. Never mock or fake submit-order or payment endpoints.
 - If cluster access, sessions or secrets are missing, finish the safe code and
@@ -112,8 +117,9 @@ Do not invent exports, options or npm publication.
 7. Safety limits
 - Dev only, never preprod or prod. The control token exposes redacted
   payloads: set expiresAt or rotate it after each QA exercise.
-- Not captured: Next fetch-cache hits (no backend call happened), DB queries,
-  Edge route handlers, background jobs. List any you find.
+- Not captured: DB queries, Edge route handlers, background jobs. Next
+  fetch-cache hits are captured as cache: 'hit' (no backend call happened,
+  mocks do not apply). List anything you find missing.
 
 8. Deliverables
 - Implement it; do not stop at a plan.

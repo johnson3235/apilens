@@ -173,11 +173,14 @@ describe('automatic instrumentation (no application code)', () => {
     const ours = globalThis.fetch;
     const nextPatched = Object.assign((input: RequestInfo | URL, init?: RequestInit) => ours(input, init), { __nextPatched: true });
     globalThis.fetch = nextPatched as typeof fetch;
+    // The global is now the cache layer standing in front of Next's patch.
+    const layered = globalThis.fetch;
+    expect((layered as typeof fetch & { __nextPatched?: boolean }).__nextPatched).toBe(true);
     const app = await listen((_req, res) => json(res, 200, {}));
 
     await (await fetch(`${app}/api/a`)).text();
     await (await fetch(`${app}/api/b`)).text();
-    expect(globalThis.fetch).toBe(nextPatched);
+    expect(globalThis.fetch).toBe(layered);
   });
 
   it('stays out of the way when autoInstrument is false or the SDK is off', async () => {

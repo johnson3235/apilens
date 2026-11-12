@@ -1,8 +1,23 @@
-# ApiLens Next SDK 0.4.0 — opt-in QA server tracing, payload capture and server mocking
+# ApiLens Next SDK 0.5.0 — opt-in QA server tracing, payload capture and server mocking
 
 Standalone Node 20+ package. No Next.js runtime dependency, no workspace dependencies, no Express custom server. This is a new adapter; `@apilens/node-sdk` is still the separate legacy Express/http SDK.
 
-## What is new in 0.4.0: hardening from the CLEAR-APP review
+## What is new in 0.5.0: "connected, but no server calls"
+
+A tester could link the extension, see it connected, and still get an empty list with no way to tell why. 0.5.0 makes the server explain itself, and closes the three gaps left open in 0.4.0.
+
+| Problem | 0.5.0 |
+|---|---|
+| Connected, but nothing captured, and no reason given | `/health` carries a **`capture` block**: requests seen and recorded, and how many were skipped because of `ignorePaths`, a missing QA session, an origin outside `allowedAppOrigins`, or no backend call, plus the last rejected origin. The extension turns it into a checklist with the exact config line to copy. |
+| An ingress rewrites the host, so every request is dropped by `allowedAppOrigins` | An origin the extension reached the control plane through with a valid token is **accepted automatically** (reported as `learnedOrigins`). Anything still rejected is counted and named. |
+| `register()` never runs (Next 14 without `experimental.instrumentationHook`), and only an old control route file answers | The first authenticated control request **installs capture itself**, and `configIssues` says so, because earlier requests were missed and it happens after every restart. |
+| Middleware calls appeared as separate entries | The Edge wrapper hands its run id to the page through Next's request-header override (`x-apilens-middleware`); the page **continues that trace** and records `middlewareSpanId`, and the extension shows the run, and its calls, under the page. |
+| Responses Next served from its fetch cache were invisible | A layer above Next's (and React's) fetch patch records them as calls with **`cache: 'hit'`**, with the data the page received. Verified on Next 14.2.35, including in-render deduplication. |
+| Several replicas: the extension only saw one, and each pod switch wiped the list | `calls?cursors=<processId>:<seq>,…` lets each pod read its own cursor. Extension 1.5.0 polls them all, merges by span id, and re-applies a saved mock to pods that missed the save. |
+
+Upgrading needs no code change.
+
+## What was new in 0.4.0: hardening from the CLEAR-APP review
 
 Every item raised in the 0.3.0 review of the CLEAR-APP spike is addressed. Upgrading needs no code change; each new behaviour is safe by default.
 
@@ -78,7 +93,7 @@ Existing 0.1.0 integrations keep working unchanged; every new capability is opt-
 
 Not captured: Edge-runtime *route handlers*, background jobs outside a request (and, by default, calls that start after the response was sent), DB queries, gRPC/raw TCP clients, third-party service internals, and the first request `next dev` handles before `register()` has run.
 
-**Next fetch-cache hits** are not seen: Next's own fetch patch answers a cached call before it reaches the SDK, so no backend call happened and none is recorded. Calls with `cache: 'no-store'` (most of CLEAR-APP) and every cache miss are captured. Review URLs and diagnostic headers for application-specific PII before sharing.
+**Next fetch-cache hits** (0.5.0+) are recorded with `cache: 'hit'`: the global `fetch` becomes an accessor, so Next's and React's patches install underneath a thin layer that notices when a call came back without reaching the network. No backend call happened, so mocks do not apply to them. Review URLs and diagnostic headers for application-specific PII before sharing.
 
 ## Choosing a transport
 
@@ -99,12 +114,12 @@ cd sdks/next
 pnpm pack
 ```
 
-This creates `apilens-next-sdk-0.4.0.tgz`. It contains compiled JS and TypeScript declarations, has no runtime dependencies and needs no `workspace:*` install. It is not published to npm.
+This creates `apilens-next-sdk-0.5.0.tgz`. It contains compiled JS and TypeScript declarations, has no runtime dependencies and needs no `workspace:*` install. It is not published to npm.
 
 Two ways to make it available to CLEAR-APP and its CI:
 
-- **GitHub Release (recommended).** Pushing a tag `next-sdk-v0.4.0` runs `.github/workflows/next-sdk-release.yml`, which builds, tests, packs and attaches `apilens-next-sdk-0.4.0.tgz` and its SHA-256 to a release. Install from the release URL (`yarn add https://github.com/<owner>/apilens/releases/download/next-sdk-v0.4.0/apilens-next-sdk-0.4.0.tgz`), or mirror it into the approved artifact registry. A private repository needs an authenticated download, so mirroring is usually simpler.
-- **Vendored tarball.** If vendor artifacts are permitted: `yarn add file:./vendor/apilens-next-sdk-0.4.0.tgz`.
+- **GitHub Release (recommended).** Pushing a tag `next-sdk-v0.5.0` runs `.github/workflows/next-sdk-release.yml`, which builds, tests, packs and attaches `apilens-next-sdk-0.5.0.tgz` and its SHA-256 to a release. Install from the release URL (`yarn add https://github.com/<owner>/apilens/releases/download/next-sdk-v0.5.0/apilens-next-sdk-0.5.0.tgz`), or mirror it into the approved artifact registry. A private repository needs an authenticated download, so mirroring is usually simpler.
+- **Vendored tarball.** If vendor artifacts are permitted: `yarn add file:./vendor/apilens-next-sdk-0.5.0.tgz`.
 
 Never reference a developer-only absolute path in a committed lockfile.
 
@@ -283,11 +298,29 @@ export const config = { /* existing matcher, unchanged */ };
 - Each run whose middleware made a backend call, redirected (3xx) or failed is recorded as a call from `serviceName`, with its `fetch` calls (bodies redacted, 32 KB each by default) nested under it.
 - Captures are posted to the control plane's `/ingest` through `event.waitUntil`, so the response is never delayed; a failed delivery is dropped silently.
 - Disabled, or with a token under 24 characters, `withApiLens` returns the middleware unchanged. The `/edge` entry imports nothing from Node.
-- Server mocks do not apply inside middleware: rules live in the Node process. The middleware run is a separate call from the page it let through; the session id links them in the panel.
+- Server mocks do not apply inside middleware: rules live in the Node process.
+- A run that made a backend call is linked to the page it let through (0.5.0+): the wrapper adds `x-apilens-middleware` to the forwarded request with the same `x-middleware-override-headers` mechanism as `NextResponse.next({ request: { headers } })`, keeping every incoming header listed. Redirects and runs without backend calls are left untouched.
+
+### Troubleshooting: connected, but no server calls
+
+Open **Server calls** in the extension. With an empty list it shows the server's own diagnosis (from `/health` → `capture`); the same data is available from the command line:
+
+```bash
+curl -s -H "authorization: Bearer $APILENS_CONTROL_TOKEN" https://<app>/api/__apilens/health | jq .capture
+```
+
+| What it says | Cause | Fix |
+|---|---|---|
+| `installed: false` | `register()` did not call `install()` | Call it from `instrumentation.ts`; on Next 14 set `experimental.instrumentationHook: true` |
+| `installedBy: "first-connection"` | Same, recovered at connection time | Same fix, or every restart misses requests again |
+| `requestsSeen: 0` | No page request reached this process | Reload a page; with several replicas, check the others are polled (`pods` in the extension) |
+| `skipped.originNotAllowed` > 0 | Requests arrive as `lastRejectedOrigin` | Add it to `allowedAppOrigins`, or connect the extension through that address |
+| `skipped.noSession` > 0 | No `x-qa-session-id` and `captureWithoutSession` off | Record a QA session with *Tag my traffic* on, or set `captureWithoutSession: true` |
+| `skipped.noBackendCall` > 0, `backendCalls: 0` | The pages fetch their data from the browser | Look under **Browser calls** |
 
 ### 4. Optional: mount the control plane as a route
 
-Only needed with `control.relay` (serverless hosts), where the extension must reach one specific function. On a single Node server the request hook serves the control plane itself; a route file, if present, is simply never reached.
+Only needed with `control.relay` (serverless hosts), where the extension must reach one specific function. On a single Node server the request hook serves the control plane itself; a route file, if present, is simply never reached. If it *is* reached, `install()` never ran: from 0.5.0 the route installs capture on the first connection and `configIssues` reports it.
 
 Create `src/app/api/%5F_apilens/[[...segments]]/route.ts`. The folder name is deliberate: the App Router treats any folder starting with `_` as private and never routes it, so a literal `__apilens` folder silently returns 404. `%5F` is Next's URL-encoded underscore, and the route is served at `/api/__apilens`.
 

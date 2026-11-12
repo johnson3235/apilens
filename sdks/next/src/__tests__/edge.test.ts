@@ -114,4 +114,61 @@ describe('Edge middleware capture', () => {
     expect(await (await middleware(new Request(`${app}/x`), event)).text()).toBe('ok');
     await expect(settle()).resolves.toBeDefined();
   });
+
+  it('links the page the middleware let through, so the extension can nest the run under it', async () => {
+    const { app, authBff, instance } = await setup();
+    const options = { enabled: true, controlToken: token, captureWithoutSession: true };
+    const checked = withApiLens(async () => {
+      await fetch(`${authBff}/session`);
+      return new Response(null, { headers: { 'x-middleware-next': '1' } });
+    }, options);
+    const { event, settle } = fetchEvent();
+    const response = await checked(new Request(`${app}/myaccount/billing`, { headers: { cookie: 'sid=1', 'x-qa-session-id': 'qa-7' } }), event);
+    await settle();
+
+    const run = instance.calls().find((call) => call.kind === 'server');
+    expect(run?.stage).toBe('middleware');
+    expect(instance.calls().every((call) => call.stage === 'middleware')).toBe(true);
+    // Next forwards exactly the listed headers, so the incoming ones must stay listed next to the link.
+    const forwarded = response.headers.get('x-middleware-override-headers')?.split(',') ?? [];
+    expect(forwarded).toEqual(expect.arrayContaining(['cookie', 'x-qa-session-id', 'x-apilens-middleware']));
+    expect(response.headers.get('x-middleware-request-cookie')).toBe('sid=1');
+    expect(response.headers.get('x-middleware-request-x-apilens-middleware')).toBe(`${run?.traceId}-${run?.spanId}`);
+    expect(instance.health().capture?.middlewareRuns).toBe(1);
+  });
+
+  it('extends an override list the middleware set itself, and treats returning nothing as next()', async () => {
+    const { app, authBff } = await setup();
+    const options = { enabled: true, controlToken: token, captureWithoutSession: true };
+    const own = withApiLens(async () => {
+      await fetch(`${authBff}/session`);
+      return new Response(null, { headers: { 'x-middleware-next': '1', 'x-middleware-override-headers': 'x-journey', 'x-middleware-request-x-journey': 'payg' } });
+    }, options);
+    const silent = withApiLens(async () => { await fetch(`${authBff}/session`); }, options);
+    const { event, settle } = fetchEvent();
+
+    const extended = await own(new Request(`${app}/a`, { headers: { cookie: 'sid=1' } }), event);
+    expect(extended.headers.get('x-middleware-override-headers')).toBe('x-journey,x-apilens-middleware');
+    expect(extended.headers.get('x-middleware-request-cookie')).toBeNull();
+
+    const continued = (await silent(new Request(`${app}/b`), event)) as Response | undefined;
+    expect(continued?.headers.get('x-middleware-next')).toBe('1');
+    expect(continued?.headers.get('x-middleware-request-x-apilens-middleware')).toMatch(/^[a-f0-9]{32}-[a-f0-9]{16}$/);
+    await settle();
+  });
+
+  it('leaves redirects and runs without backend calls untouched', async () => {
+    const { app, authBff } = await setup();
+    const options = { enabled: true, controlToken: token, captureWithoutSession: true };
+    const redirecting = withApiLens(async (request: Request) => {
+      await fetch(`${authBff}/session`);
+      return Response.redirect(new URL('/login', request.url), 307);
+    }, options);
+    const idle = withApiLens(() => new Response(null, { headers: { 'x-middleware-next': '1' } }), options);
+    const { event, settle } = fetchEvent();
+    expect((await redirecting(new Request(`${app}/a`), event)).headers.get('location')).toMatch(/\/login$/);
+    expect((await idle(new Request(`${app}/b`), event)).headers.get('x-middleware-override-headers')).toBeNull();
+    await settle();
+  });
 });
+
