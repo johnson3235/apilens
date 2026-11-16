@@ -2,7 +2,7 @@ import type { ConfigIssue, ControlHealth, NextSDKOptions, ServerCall, ServerMock
 export * from './types';
 export { DEFAULT_TEXT_CONTENT_TYPES } from './bodies';
 export { MIN_TOKEN_LENGTH } from './control';
-export declare const SDK_VERSION = "0.5.0";
+export { SDK_VERSION } from './version';
 /**
  * Session id used when `captureWithoutSession` is on.
  *
@@ -34,6 +34,13 @@ export interface ServerSpan {
     mockedBy: string | null;
 }
 /**
+ * Adds the QA session to W3C baggage, which OpenTelemetry-instrumented
+ * backends carry on to the services they call, so an ApiLens relay in front
+ * of those services can tell whose request it is. Returns null when there is
+ * nothing to add (no QA session, or already present).
+ */
+export declare function withSessionBaggage(existing: unknown, sessionId: string): string | null;
+/**
  * Builds the outgoing ignore test. A string with a scheme is a URL prefix,
  * `:port` matches any host on that port, `host:port` the exact pair, and a
  * bare host that host or its subdomains.
@@ -61,6 +68,7 @@ export declare class ApiLensNextSDK {
     /** Set once this process answers the extension: from then on it keeps calls itself. */
     private servedControl;
     private relayFailures;
+    private readonly relays;
     private lastRelayError;
     private readonly auto;
     private requestHook;
@@ -95,6 +103,8 @@ export declare class ApiLensNextSDK {
     /** True when the extension can reach this process over the control plane. */
     get controlEnabled(): boolean;
     health(): ControlHealth;
+    /** Relays heard from recently, most recent first. */
+    private liveRelays;
     /** Calls captured so far, newest last. Useful for assertions in automated tests. */
     calls(): ServerCall[];
     clearCalls(): void;

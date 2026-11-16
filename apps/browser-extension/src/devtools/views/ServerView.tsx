@@ -8,7 +8,9 @@ import {
   groupCallsByRoute,
   relatedServerCalls,
   serverCallHost,
+  serverCallKindClass,
   serverCallKindLabel,
+  serverCallParent,
   serverRuleFromCall,
   type ServerCall,
   type ServerFlowRow,
@@ -53,12 +55,15 @@ function barClass(call: ServerCall, depth: number): string {
 
 /** One line per page: what it took to answer it. */
 function pageSummary(children: ServerCall[]): string {
-  const backend = children.filter((call) => call.kind === 'client' && call.cache !== 'hit' && call.stage !== 'middleware').length;
+  const backend = children.filter((call) => call.kind === 'client' && !call.layer && call.cache !== 'hit' && call.stage !== 'middleware').length;
+  // Calls the relay saw a backend make further down (TMF, OSB…).
+  const downstream = children.filter((call) => call.layer).length;
   const cached = children.filter((call) => call.cache === 'hit').length;
   const middleware = children.some((call) => call.stage === 'middleware');
   const failed = children.filter((call) => call.status === 'error').length;
   return [
     backend ? `${backend} backend` : null,
+    downstream ? `${downstream} downstream` : null,
     middleware ? 'middleware' : null,
     cached ? `${cached} cached` : null,
     failed ? `${failed} failed` : null,
@@ -136,20 +141,23 @@ export function ServerView({
       if (kind === 'backend' && call.kind !== 'client') return false;
       for (const flag of flags) if (!matchesFlag(call, flag)) return false;
       if (!needle) return true;
-      return `${call.method} ${call.url} ${call.statusCode ?? ''} ${call.serviceName} ${call.mockedBy ?? ''} ${call.requestBody?.content ?? ''} ${call.responseBody?.content ?? ''}`
+      return `${call.method} ${call.url} ${call.statusCode ?? ''} ${call.serviceName} ${call.layer ?? ''} ${call.mockedBy ?? ''} ${call.requestBody?.content ?? ''} ${call.responseBody?.content ?? ''}`
         .toLowerCase()
         .includes(needle);
     });
     if (!grouped || kind !== 'all' || (flags.size === 0 && !needle)) return direct;
-    // A matching backend call keeps its page (and middleware run) around it, so it is never shown out of context.
+    // A matching call keeps everything above it (page, middleware run, the backend call a TMF call came from), so it is never shown out of context.
     const keep = new Set(direct.map((call) => call.spanId));
-    const bySpan = new Map(scoped.map((call) => [call.spanId, call]));
     for (const call of direct) {
-      const parent = call.parentSpanId ? bySpan.get(call.parentSpanId) : undefined;
-      if (parent) keep.add(parent.spanId);
-      if (parent?.stage === 'middleware') {
-        const page = scoped.find((candidate) => candidate.middlewareSpanId === parent.spanId);
-        if (page) keep.add(page.spanId);
+      let parent = serverCallParent(call, scoped);
+      for (let hops = 0; parent && hops < 8; hops += 1) {
+        keep.add(parent.spanId);
+        if (parent.stage === 'middleware') {
+          const run = parent;
+          const page = scoped.find((candidate) => candidate.middlewareSpanId === run.spanId);
+          if (page) keep.add(page.spanId);
+        }
+        parent = serverCallParent(parent, scoped);
       }
     }
     return scoped.filter((call) => keep.has(call.spanId));
@@ -238,7 +246,7 @@ export function ServerView({
                 onClick={(event) => { event.stopPropagation(); toggleCollapsed(call.spanId); }}
               ><Icon name="chevron" size={12} /></button>
             ) : depth === 0 ? <span className="twisty" aria-hidden="true" /> : <span className={`indent d${depth}`} aria-hidden="true" />}
-            <span className={`tag kind-${label.toLowerCase()}`}>{label}</span>
+            <span className={`tag ${serverCallKindClass(call)}`} title={call.layer ? `${call.serviceName} called this through the ApiLens relay` : undefined}>{label}</span>
             <span className={`method-label ${call.method.toLowerCase()}`}>{call.method}</span>
             {call.kind === 'client' ? <span className="host" title={call.origin}>{serverCallHost(call)}</span> : null}
             <span className="path-main" title={call.url}>{call.path || call.url}</span>

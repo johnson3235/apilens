@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupCallsByRoute, normalizeControlUrl, relatedServerCalls, serverRuleFromCall, type ServerCall } from './server-control';
+import { groupCallsByRoute, normalizeControlUrl, relatedServerCalls, serverCallKindClass, serverCallKindLabel, serverRuleFromCall, type ServerCall } from './server-control';
 import { serverCallToSpan } from '../background/server-bridge';
 
 const call: ServerCall = {
@@ -153,5 +153,58 @@ describe('groupCallsByRoute', () => {
     const run: ServerCall = { ...route, seq: 30, spanId: 'mw-only', traceId: 'trace-r', stage: 'middleware', statusCode: 307 };
     const session: ServerCall = { ...customer, seq: 31, spanId: 'mw-s', traceId: 'trace-r', parentSpanId: 'mw-only', stage: 'middleware' };
     expect(groupCallsByRoute([run, session]).map((row) => [row.call.spanId, row.depth])).toEqual([['mw-only', 0], ['mw-s', 1]]);
+  });
+});
+
+describe('calls seen by the ApiLens relay (BFF → JCS → TMF → OSB)', () => {
+  const at = (start: number, end: number) => ({ startedAt: start, endedAt: end, durationMs: end - start });
+  const page: ServerCall = { ...call, seq: 1, spanId: 'page', traceId: 'T', kind: 'server', path: '/orders/new', ...at(0, 900) };
+  const jcs: ServerCall = { ...call, seq: 2, spanId: 'jcs', traceId: 'T', parentSpanId: 'page', path: '/jcs/orders', ...at(10, 880) };
+  // The relay records JCS's own span as the parent, which ApiLens never sees.
+  const tmf622: ServerCall = { ...call, seq: 3, spanId: 'tmf622', traceId: 'T', parentSpanId: 'jcs-internal-1', serviceName: 'jcs', layer: 'tmf622', path: '/productOrder', ...at(40, 600) };
+  const tmf629: ServerCall = { ...call, seq: 4, spanId: 'tmf629', traceId: 'T', parentSpanId: 'jcs-internal-2', serviceName: 'jcs', layer: 'tmf629', path: '/customer/1', ...at(45, 120) };
+  const osb: ServerCall = { ...call, seq: 5, spanId: 'osb', traceId: 'T', parentSpanId: 'tmf622-internal', serviceName: 'tmf622', layer: 'osb', path: '/osb/order', ...at(100, 500) };
+
+  it('nests each hop under the call that made it', () => {
+    const rows = groupCallsByRoute([osb, tmf629, tmf622, jcs, page]);
+    expect(rows.map((row) => [row.call.spanId, row.depth, row.childCount, row.last])).toEqual([
+      ['page', 0, 4, false],
+      ['jcs', 1, 2, true],
+      ['tmf622', 2, 1, false],
+      ['osb', 3, 0, true],
+      ['tmf629', 2, 0, true],
+    ]);
+  });
+
+  it('tolerates a small clock difference between the app and the relay host', () => {
+    const early: ServerCall = { ...tmf629, ...at(5, 885) };
+    expect(groupCallsByRoute([page, jcs, early]).find((row) => row.call.spanId === 'tmf629')?.depth).toBe(2);
+  });
+
+  it('keeps relay calls from another trace, or without one, at the top', () => {
+    const elsewhere: ServerCall = { ...tmf629, traceId: 'OTHER' };
+    expect(groupCallsByRoute([page, jcs, elsewhere]).find((row) => row.call.spanId === 'tmf629')?.depth).toBe(0);
+  });
+
+  it('nests under the BFF call directly when the backend forwards the trace without its own span', () => {
+    const forwarded: ServerCall = { ...tmf629, parentSpanId: 'jcs', ...at(2_000, 2_100) };
+    expect(relatedServerCalls(forwarded, [page, jcs, forwarded]).parent).toBe(jcs);
+  });
+
+  it('shows what a JCS call led to, and where a TMF call came from', () => {
+    const all = [page, jcs, tmf622, tmf629, osb];
+    expect(relatedServerCalls(jcs, all)).toMatchObject({ parent: page, children: [tmf622, tmf629] });
+    expect(relatedServerCalls(osb, all)).toMatchObject({ parent: tmf622, children: [] });
+  });
+
+  it('labels a relay call by its route and scopes a mock made from it to the tester', () => {
+    expect(serverCallKindLabel(tmf622)).toBe('TMF622');
+    expect(serverCallKindClass(tmf622)).toBe('kind-layer');
+    expect(serverCallKindClass(jcs)).toBe('kind-backend');
+    const rule = serverRuleFromCall(tmf622);
+    expect(rule.match).toMatchObject({ sessionId: 'qa-1', urlPattern: '*/productOrder', kind: 'client' });
+    expect(rule.name).toBe('TMF622 POST /productOrder → 503');
+    expect(serverRuleFromCall({ ...tmf622, sessionId: 'apilens-ambient' }).match.sessionId).toBeUndefined();
+    expect(serverRuleFromCall(jcs).match.sessionId).toBeUndefined();
   });
 });

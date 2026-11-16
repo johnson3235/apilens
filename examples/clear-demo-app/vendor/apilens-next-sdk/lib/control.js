@@ -167,7 +167,8 @@ function createControlHandler(context) {
                 if (!Array.isArray(calls) || calls.length > exports.MAX_RELAY_BATCH) {
                     return reply(request, 400, { error: `Expected a calls array of at most ${exports.MAX_RELAY_BATCH}.` });
                 }
-                return reply(request, 200, { accepted: context.ingest(calls), processId: context.processId });
+                const relay = payload.relay;
+                return reply(request, 200, { accepted: context.ingest(calls, relay), processId: context.processId });
             }
             if (operation === 'consume' && request.method === 'POST') {
                 const payload = await request.json().catch(() => null);

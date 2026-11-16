@@ -136,6 +136,7 @@ export function diagnoseCapture(status: ServerBridgeStatus | null, visibleCalls:
       detail: `${plural(skipped.noBackendCall, 'page load')} made no server-side call, so there was nothing to show. If the page fetches its data from the browser, those calls are under Browser calls.`,
     });
   }
+  checks.push(...relayChecks(health.relays ?? []));
   if (skipped.ignoredPath > 0) {
     checks.push({
       id: 'ignored',
@@ -145,6 +146,57 @@ export function diagnoseCapture(status: ServerBridgeStatus | null, visibleCalls:
     });
   }
   return summarise(checks, visibleCalls);
+}
+
+/** Spring Boot 3 settings that carry the QA session from the BFF on to the services JCS calls. */
+export const SPRING_SESSION_PROPAGATION = `# application-dev.yml of the backend (Spring Boot 3 with micrometer-tracing)
+management:
+  tracing:
+    propagation:
+      type: w3c
+    baggage:
+      remote-fields: x-qa-session-id, x-test-scenario-id`;
+
+/** What each ApiLens relay in front of a backend (JCS → TMF, TMF → OSB) reported. */
+function relayChecks(relays: NonNullable<NonNullable<ServerBridgeStatus['health']>['relays']>): DiagnosisCheck[] {
+  const checks: DiagnosisCheck[] = [];
+  for (const relay of relays) {
+    const routes = relay.routes.map((route) => route.toUpperCase()).join(', ') || 'no routes';
+    if (relay.forwarded === 0) {
+      checks.push({
+        id: `relay:${relay.name}`,
+        state: 'info',
+        title: `Relay ${relay.name} is up, but nothing went through it yet`,
+        detail: `Routes: ${routes}. Use the app, or check that the backend’s base URLs for these services point at the relay.`,
+      });
+    } else if (relay.captured === 0 && relay.unattributed > 0) {
+      checks.push({
+        id: `relay:${relay.name}`,
+        state: 'warn',
+        title: `${plural(relay.unattributed, 'call')} went through relay ${relay.name}, none of them from a QA session`,
+        detail: relay.sharedEnvironment
+          ? 'The backend does not pass your QA session on to the services it calls, so the relay cannot tell your calls from other squads’ and leaves them alone. Ask the backend team to add this config; no code changes.'
+          : 'The backend does not pass your QA session on, so these calls are recorded under the shared session.',
+        fix: SPRING_SESSION_PROPAGATION,
+      });
+    } else {
+      checks.push({
+        id: `relay:${relay.name}`,
+        state: 'ok',
+        title: `Relay ${relay.name}: ${plural(relay.captured, 'call')} recorded`,
+        detail: `${routes}${relay.mocked ? ` · ${relay.mocked} answered by mocks` : ''}${relay.upstreamErrors ? ` · ${plural(relay.upstreamErrors, 'call')} could not reach the service` : ''}${relay.unattributed ? ` · ${relay.unattributed} from other squads passed through untouched` : ''}`,
+      });
+    }
+    if (relay.dropped > 0) {
+      checks.push({
+        id: `relay-dropped:${relay.name}`,
+        state: 'warn',
+        title: `Relay ${relay.name} dropped ${plural(relay.dropped, 'call')}`,
+        detail: 'It could not deliver them to this app for a while. The calls themselves went through normally; only their capture was lost.',
+      });
+    }
+  }
+  return checks;
 }
 
 function summarise(checks: DiagnosisCheck[], visibleCalls: number): CaptureDiagnosis {

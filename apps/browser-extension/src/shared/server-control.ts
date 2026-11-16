@@ -57,6 +57,8 @@ export interface ServerCall {
   middlewareSpanId?: string | null;
   /** `hit` when Next answered from its fetch cache and no backend call was made (SDK 0.5.0+). */
   cache?: 'hit' | null;
+  /** Set by the ApiLens relay: the route it went through, such as `tmf622` (SDK 0.6.0+). */
+  layer?: string | null;
 }
 
 export type ServerMockMatchType = 'glob' | 'regex' | 'contains' | 'equals' | 'startsWith';
@@ -135,6 +137,23 @@ export interface ServerControlHealth {
   agentDelivery: { accepted: number; dropped: number; lastError: string | null };
   /** What the server's request hook saw and skipped (SDK 0.5.0+). */
   capture?: ServerCaptureStats;
+  /** Relays in front of backend services that reported recently (SDK 0.6.0+). */
+  relays?: ServerRelayStatus[];
+}
+
+/** An ApiLens relay between a backend (such as JCS) and the services it calls. */
+export interface ServerRelayStatus {
+  name: string;
+  version: string;
+  routes: string[];
+  sharedEnvironment: boolean;
+  forwarded: number;
+  captured: number;
+  unattributed: number;
+  mocked: number;
+  upstreamErrors: number;
+  dropped: number;
+  lastSeenAt: number;
 }
 
 export interface ServerCaptureStats {
@@ -309,26 +328,89 @@ export class ServerControlClient {
 export interface ServerFlowRow {
   call: ServerCall;
   /**
-   * 0 for an incoming route or an orphan upstream call; 1 for an upstream call
-   * under its route, or the middleware run that let the route through; 2 for
-   * a call that middleware run made.
+   * 0 for an incoming route or an orphan upstream call. Below it: the
+   * middleware run that let the route through (and its calls), the backend
+   * calls the route made, and under each of those the calls an ApiLens relay
+   * saw that backend make (JCS → TMF → OSB), one level per hop.
    */
-  depth: 0 | 1 | 2;
-  /** Upstream calls listed under this row (routes only). */
+  depth: number;
+  /** Rows listed under this one: all of them for a route, direct ones below that. */
   childCount: number;
-  /** True for the last upstream call under its route, so the tree connector can close. */
+  /** True for the last row among its siblings, so the tree connector can close. */
   last: boolean;
 }
 
-function isChildOf(child: ServerCall, parent: ServerCall): boolean {
-  return child.kind === 'client' && child.traceId === parent.traceId && child.parentSpanId === parent.spanId;
+/** Deepest level drawn; anything below is shown at this depth. */
+export const MAX_FLOW_DEPTH = 4;
+
+/** The session the server SDK records when a request carries none. */
+const AMBIENT_SESSION = 'apilens-ambient';
+
+/** Clocks of the app and a relay host differ a little; containment allows this much. */
+const RELAY_SKEW_MS = 100;
+
+/** True when `outer` can hold `inner`; two relay calls never hold each other. */
+function encloses(outer: ServerCall, inner: ServerCall): boolean {
+  if (outer.spanId === inner.spanId || outer.kind !== 'client' || outer.traceId !== inner.traceId) return false;
+  // Only the app's clock and a relay's can disagree; two relay hops are timed by relays.
+  const skew = outer.layer ? 0 : RELAY_SKEW_MS;
+  if (outer.startedAt > inner.startedAt + skew || outer.endedAt < inner.endedAt - skew) return false;
+  // An app call never gets a relay parent, so only relay hops need the order that rules out cycles.
+  if (!outer.layer) return true;
+  return outer.durationMs > inner.durationMs || (outer.durationMs === inner.durationMs && outer.spanId < inner.spanId);
 }
 
 /**
- * Orders calls so each incoming route is followed by the upstream calls it made.
+ * How likely `outer` made the relay call `inner`, or -1 when it cannot have.
  *
- * Upstream calls whose route is not in `calls` (filtered out, or evicted from
- * the server buffer) stay top-level rather than disappearing.
+ * Calls from the same caller are siblings (JCS calling TMF622 and TMF629 in
+ * parallel), never parent and child, whatever their timing. A relay call
+ * whose route names the caller (`tmf622` for a call made by `tmf`) is the
+ * best match; then any other relay hop; then the BFF's own call.
+ */
+function parentRank(outer: ServerCall, inner: ServerCall): number {
+  if (!outer.layer) return 1;
+  const caller = inner.serviceName.toLowerCase();
+  if (outer.serviceName.toLowerCase() === caller) return -1;
+  return outer.layer.toLowerCase().startsWith(caller) ? 3 : 2;
+}
+
+/**
+ * The call that made `call`.
+ *
+ * The SDK links its own calls by span. A relay call carries the backend's
+ * span instead (JCS's, which ApiLens never sees), so it goes under the
+ * most likely call on the same trace whose time window holds it: the BFF's
+ * call to JCS for a TMF call, that TMF call for an OSB call.
+ */
+export function serverCallParent(call: ServerCall, calls: ServerCall[]): ServerCall | null {
+  if (call.kind !== 'client') return null;
+  if (call.parentSpanId) {
+    const direct = calls.find((candidate) => candidate.spanId === call.parentSpanId && candidate.traceId === call.traceId);
+    // A backend that forwards the trace without a span of its own leaves the BFF's span as the parent.
+    if (direct && (direct.kind === 'server' || call.layer)) return direct;
+  }
+  if (!call.layer) return null;
+  let best: ServerCall | null = null;
+  let bestRank = -1;
+  for (const candidate of calls) {
+    if (!encloses(candidate, call)) continue;
+    const rank = parentRank(candidate, call);
+    if (rank < 0) continue;
+    const tighter = best !== null && (candidate.startedAt > best.startedAt || (candidate.startedAt === best.startedAt && encloses(best, candidate)));
+    if (rank > bestRank || (rank === bestRank && tighter)) {
+      best = candidate;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+/**
+ * Orders calls so each incoming route is followed by everything it caused.
+ *
+ * Calls whose route is not in `calls` (filtered out, or evicted from the
+ * server buffer) stay top-level rather than disappearing.
  */
 export function groupCallsByRoute(calls: ServerCall[]): ServerFlowRow[] {
   const routes = new Map<string, ServerCall>();
@@ -349,8 +431,8 @@ export function groupCallsByRoute(calls: ServerCall[]): ServerFlowRow[] {
   const roots: ServerCall[] = [];
   for (const call of calls) {
     if (nested.has(call.spanId)) continue;
-    const parent = call.parentSpanId ? routes.get(call.parentSpanId) : undefined;
-    if (parent && isChildOf(call, parent)) {
+    const parent = serverCallParent(call, calls);
+    if (parent) {
       const list = children.get(parent.spanId) ?? [];
       list.push(call);
       children.set(parent.spanId, list);
@@ -361,33 +443,37 @@ export function groupCallsByRoute(calls: ServerCall[]): ServerFlowRow[] {
 
   const byStart = (a: ServerCall, b: ServerCall): number => a.startedAt - b.startedAt || a.seq - b.seq;
   const rows: ServerFlowRow[] = [];
-  for (const root of roots.sort(byStart)) {
-    const own = (children.get(root.spanId) ?? []).sort(byStart);
-    const run = middlewareOf.get(root.spanId);
-    const runCalls = run ? (children.get(run.spanId) ?? []).sort(byStart) : [];
-    rows.push({ call: root, depth: 0, childCount: own.length + (run ? 1 + runCalls.length : 0), last: false });
-    if (run) {
-      rows.push({ call: run, depth: 1, childCount: runCalls.length, last: own.length === 0 });
-      runCalls.forEach((child, index) => rows.push({ call: child, depth: 2, childCount: 0, last: index === runCalls.length - 1 }));
-    }
-    own.forEach((child, index) => rows.push({ call: child, depth: 1, childCount: 0, last: index === own.length - 1 }));
-  }
+  const emit = (call: ServerCall, depth: number, last: boolean, seen: Set<string>): number => {
+    const index = rows.length;
+    rows.push({ call, depth: Math.min(depth, MAX_FLOW_DEPTH), childCount: 0, last });
+    const run = depth === 0 ? middlewareOf.get(call.spanId) : undefined;
+    const own = (children.get(call.spanId) ?? []).filter((child) => !seen.has(child.spanId)).sort(byStart);
+    const kids: ServerCall[] = run ? [run, ...own] : own;
+    let total = 0;
+    kids.forEach((child, position) => {
+      seen.add(child.spanId);
+      total += 1 + emit(child, depth + 1, position === kids.length - 1, seen);
+    });
+    rows[index]!.childCount = depth === 0 ? total : kids.length;
+    return total;
+  };
+  for (const root of roots.sort(byStart)) emit(root, 0, false, new Set([root.spanId]));
   return rows;
 }
 
-/** The route that made `call`, and the upstream calls `call` made, from the captured set. */
+/** The call that made `call`, and the calls `call` made, from the captured set. */
 export function relatedServerCalls(
   call: ServerCall,
   calls: ServerCall[],
 ): { parent: ServerCall | null; children: ServerCall[]; middleware: ServerCall | null } {
-  const parent = call.parentSpanId
-    ? calls.find((candidate) => candidate.kind === 'server' && isChildOf(call, candidate)) ?? null
-    : call.stage === 'middleware' && call.kind === 'server'
+  const parent = call.kind === 'client'
+    ? serverCallParent(call, calls)
+    : call.stage === 'middleware'
       ? calls.find((candidate) => candidate.kind === 'server' && candidate.middlewareSpanId === call.spanId) ?? null
       : null;
-  const children = call.kind === 'server'
-    ? calls.filter((candidate) => isChildOf(candidate, call)).sort((a, b) => a.startedAt - b.startedAt)
-    : [];
+  const children = calls
+    .filter((candidate) => candidate.kind === 'client' && candidate.spanId !== call.spanId && serverCallParent(candidate, calls)?.spanId === call.spanId)
+    .sort((a, b) => a.startedAt - b.startedAt);
   const middleware = call.kind === 'server' && call.middlewareSpanId
     ? calls.find((candidate) => candidate.spanId === call.middlewareSpanId && candidate.stage === 'middleware') ?? null
     : null;
@@ -399,8 +485,8 @@ export function serverRuleFromCall(call: ServerCall, overrides: Partial<ServerMo
   const now = Date.now();
   return {
     id: `srv-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    name: `${call.method} ${call.path} → 503`,
-    description: `Created from a captured ${call.kind === 'client' ? 'outbound' : 'incoming'} call on ${call.serviceName}.`,
+    name: `${call.layer ? `${call.layer.toUpperCase()} ` : ''}${call.method} ${call.path} → 503`,
+    description: `Created from a captured ${call.kind === 'client' ? 'outbound' : 'incoming'} call on ${call.serviceName}${call.layer ? ` through the relay route ${call.layer}` : ''}.`,
     enabled: false,
     priority: 100,
     match: {
@@ -410,6 +496,8 @@ export function serverRuleFromCall(call: ServerCall, overrides: Partial<ServerMo
       urlPattern: `*${call.path}`,
       matchType: 'glob',
       kind: call.kind,
+      // A relay sits on a shared backend: a mock made from a tester's call answers only that tester.
+      ...(call.layer && call.sessionId !== AMBIENT_SESSION ? { sessionId: call.sessionId } : {}),
     },
     action: { type: 'status-code', statusCode: 503, body: JSON.stringify({ error: 'Service unavailable', simulated: true }, null, 2) },
     // One call by default: the server is usually shared with other testers.
@@ -543,9 +631,11 @@ export function explainServerCall(call: ServerCall): string {
   if (call.cache === 'hit') {
     return `Next answered ${call.method} ${serverCallHost(call)}${call.path} from its own cache: the backend was not called this time. The data shown is what the page received.`;
   }
-  const who = call.stage === 'middleware' ? 'The Edge middleware' : 'The server';
+  const who = call.layer ? call.serviceName : call.stage === 'middleware' ? 'The Edge middleware' : 'The server';
   const target = call.kind === 'client'
-    ? `${who} called the backend ${serverCallHost(call)} (${call.method} ${call.path})`
+    ? call.layer
+      ? `${who} called ${call.layer.toUpperCase()} at ${serverCallHost(call)} (${call.method} ${call.path}), seen by the ApiLens relay,`
+      : `${who} called the backend ${serverCallHost(call)} (${call.method} ${call.path})`
     : `The page asked this server for ${call.path} (${call.method})`;
   const answer = call.statusCode === null
     ? call.error ? ' but got no answer.' : '.'
@@ -555,7 +645,14 @@ export function explainServerCall(call: ServerCall): string {
 }
 
 /** Short kind label used across the Server view: what produced this row. */
-export function serverCallKindLabel(call: Pick<ServerCall, 'kind' | 'stage' | 'cache'>): 'Page' | 'Middleware' | 'Backend' | 'Cache' {
+export function serverCallKindLabel(call: Pick<ServerCall, 'kind' | 'stage' | 'cache' | 'layer'>): string {
   if (call.kind === 'server') return call.stage === 'middleware' ? 'Middleware' : 'Page';
+  if (call.layer) return call.layer.toUpperCase();
   return call.cache === 'hit' ? 'Cache' : 'Backend';
+}
+
+/** CSS modifier for the kind tag: relay routes share one colour. */
+export function serverCallKindClass(call: Pick<ServerCall, 'kind' | 'stage' | 'cache' | 'layer'>): string {
+  if (call.kind === 'client' && call.layer) return 'kind-layer';
+  return `kind-${serverCallKindLabel(call).toLowerCase()}`;
 }

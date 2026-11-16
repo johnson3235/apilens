@@ -69,6 +69,8 @@ export function ServerMockEditor({
   onDelete?: () => void;
 }): JSX.Element {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  // The session a relay call came from, so the tester can widen the rule and narrow it back.
+  const [ownSession] = useState(rule.match.sessionId ?? null);
   const patch = (changes: Partial<ServerMockRule>): void => onChange({ ...rule, ...changes, updatedAt: Date.now() });
   const patchMatch = (changes: Partial<ServerMockRule['match']>): void => patch({ match: { ...rule.match, ...changes } });
   const patchAction = (changes: Partial<ServerMockRule['action']>): void => patch({ action: { ...rule.action, ...changes } });
@@ -110,6 +112,15 @@ export function ServerMockEditor({
         <p className="target-sentence">
           When the server makes <strong className="mono">{describeRuleTarget(rule)}</strong>, ApiLens answers instead of the real backend.
         </p>
+        {ownSession ? (
+          <label className="scope-option">
+            <input type="checkbox" checked={rule.match.sessionId === ownSession} onChange={(event) => patchMatch({ sessionId: event.target.checked ? ownSession : null })} />
+            <span>
+              <strong>Only my QA session</strong>
+              <small>{rule.match.sessionId ? 'Other testers and squads on this environment keep getting the real answer.' : 'Every tester recording on this environment gets this answer. Traffic without a QA session is never affected.'}</small>
+            </span>
+          </label>
+        ) : null}
       </section>
 
       <section className="mock-step">
