@@ -31,6 +31,7 @@ import type {
   ControlPlaneOptions,
   MockSkipReason,
   NextSDKOptions,
+  RelayStatus,
   ServerCall,
   ServerMockRule,
 } from './types';
@@ -39,7 +40,8 @@ export * from './types';
 export { DEFAULT_TEXT_CONTENT_TYPES } from './bodies';
 export { MIN_TOKEN_LENGTH } from './control';
 
-export const SDK_VERSION = '0.5.0';
+export { SDK_VERSION } from './version';
+import { SDK_VERSION } from './version';
 
 /**
  * Session id used when `captureWithoutSession` is on.
@@ -90,6 +92,23 @@ interface AutoRequest {
 }
 
 const id = (bytes: number) => randomBytes(bytes).toString('hex');
+/**
+ * Adds the QA session to W3C baggage, which OpenTelemetry-instrumented
+ * backends carry on to the services they call, so an ApiLens relay in front
+ * of those services can tell whose request it is. Returns null when there is
+ * nothing to add (no QA session, or already present).
+ */
+export function withSessionBaggage(existing: unknown, sessionId: string): string | null {
+  if (sessionId === AMBIENT_SESSION_ID) return null;
+  const current = Array.isArray(existing) ? existing.join(',') : typeof existing === 'string' ? existing : '';
+  if (/(^|,)\s*x-qa-session-id\s*=/i.test(current)) return null;
+  const entry = `x-qa-session-id=${encodeURIComponent(sessionId)}`;
+  return current.trim() ? `${current},${entry}` : entry;
+}
+
+/** A relay that stopped delivering drops out of /health after this long. */
+const RELAY_SEEN_MS = 5 * 60_000;
+const MAX_RELAYS = 20;
 const safeId = (value: string | null): string | undefined => value && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value) ? value : undefined;
 
 function parseMiddlewareLink(value: string | null): { traceId: string; spanId: string } | null {
@@ -281,6 +300,7 @@ export class ApiLensNextSDK {
   /** Set once this process answers the extension: from then on it keeps calls itself. */
   private servedControl = false;
   private relayFailures = 0;
+  private readonly relays = new Map<string, RelayStatus>();
   private lastRelayError: string | null = null;
   private readonly auto: AutoInstrumentOptions | null;
   private requestHook: RequestHook | null = null;
@@ -389,7 +409,7 @@ export class ApiLensNextSDK {
           setRules: (rules) => this.applyRules(rules),
           rulesRevision: () => this.rulesRev,
           clearCalls: () => this.buffer.clear(),
-          ingest: (calls) => this.ingestRelayed(calls),
+          ingest: (calls, relay) => this.ingestRelayed(calls, relay),
           consume: (ruleIds) => {
             for (const rule of this.rules) if (ruleIds.includes(rule.id)) rule.appliedCount += 1;
           },
@@ -440,7 +460,14 @@ export class ApiLensNextSDK {
       activeRuleCount: this.rules.filter((rule) => rule.enabled).length,
       agentDelivery: { ...this.reporter.diagnostics },
       capture: { ...this.stats, skipped: { ...this.stats.skipped }, learnedOrigins: [...this.learnedOrigins] },
+      relays: this.liveRelays(),
     };
+  }
+
+  /** Relays heard from recently, most recent first. */
+  private liveRelays(): RelayStatus[] {
+    const cutoff = Date.now() - RELAY_SEEN_MS;
+    return [...this.relays.values()].filter((relay) => relay.lastSeenAt >= cutoff).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
   }
 
   /** Calls captured so far, newest last. Useful for assertions in automated tests. */
@@ -860,6 +887,8 @@ export class ApiLensNextSDK {
       if (this.propagate.has(new URL(call.url).origin) && !request.headersSent) {
         request.setHeader('traceparent', `00-${ctx.traceId}-${spanId}-01`);
         request.setHeader('x-qa-session-id', ctx.sessionId);
+        const baggage = withSessionBaggage(request.getHeader('baggage'), ctx.sessionId);
+        if (baggage) request.setHeader('baggage', baggage);
         if (ctx.scenarioId) request.setHeader('x-test-scenario-id', ctx.scenarioId);
       }
     } catch {
@@ -1005,6 +1034,8 @@ export class ApiLensNextSDK {
       if (this.propagate.has(new URL(url).origin)) {
         headers.set('traceparent', `00-${ctx.traceId}-${spanId}-01`);
         headers.set('x-qa-session-id', ctx.sessionId);
+        const baggage = withSessionBaggage(headers.get('baggage'), ctx.sessionId);
+        if (baggage) headers.set('baggage', baggage);
         if (ctx.scenarioId) headers.set('x-test-scenario-id', ctx.scenarioId);
         outgoing = { ...init, headers }; // Keep body, signal, cache, next and duplex untouched.
       }
@@ -1481,7 +1512,13 @@ export class ApiLensNextSDK {
     if (Array.isArray(payload?.rules)) this.setServerMockRules(payload.rules);
   }
 
-  private ingestRelayed(calls: unknown[]): number {
+  private ingestRelayed(calls: unknown[], relay?: unknown): number {
+    const status = relayStatus(relay);
+    if (status) {
+      this.relays.set(status.name, status);
+      // Bounded: names come from the network.
+      if (this.relays.size > MAX_RELAYS) this.relays.delete(this.relays.keys().next().value as string);
+    }
     let kept = 0;
     for (const raw of calls) {
       const call = relayedCall(raw);
@@ -1571,6 +1608,29 @@ function relayedCall(raw: unknown): Omit<ServerCall, 'seq'> | null {
     ...(value.stage === 'middleware' ? { stage: 'middleware' as const } : {}),
     ...(text('middlewareSpanId', 64) ? { middlewareSpanId: text('middlewareSpanId', 64) } : {}),
     ...(value.cache === 'hit' ? { cache: 'hit' as const } : {}),
+    ...(text('layer', 64) ? { layer: text('layer', 64) } : {}),
+  };
+}
+
+/** Validates the status a relay sends with its calls; anything malformed is ignored. */
+function relayStatus(raw: unknown): RelayStatus | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  const name = typeof value.name === 'string' && /^[\w.:-]{1,64}$/.test(value.name) ? value.name : null;
+  if (!name) return null;
+  const count = (key: string) => (typeof value[key] === 'number' && Number.isFinite(value[key]) ? Math.max(0, Math.trunc(value[key] as number)) : 0);
+  return {
+    name,
+    version: typeof value.version === 'string' ? value.version.slice(0, 32) : 'unknown',
+    routes: Array.isArray(value.routes) ? value.routes.filter((route): route is string => typeof route === 'string').slice(0, 50).map((route) => route.slice(0, 64)) : [],
+    sharedEnvironment: value.sharedEnvironment !== false,
+    forwarded: count('forwarded'),
+    captured: count('captured'),
+    unattributed: count('unattributed'),
+    mocked: count('mocked'),
+    upstreamErrors: count('upstreamErrors'),
+    dropped: count('dropped'),
+    lastSeenAt: Date.now(),
   };
 }
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { describeStatus, explainServerCall, serverCallHost, serverCallKindLabel, type ServerCall } from '../../shared/server-control';
+import { describeStatus, explainServerCall, serverCallHost, serverCallKindClass, serverCallKindLabel, type ServerCall } from '../../shared/server-control';
 import { BodyViewer } from './BodyViewer';
 import { Icon } from './Icon';
 
@@ -23,7 +23,7 @@ function FlowRow({ call, onSelect }: { call: ServerCall; onSelect: (call: Server
   const label = serverCallKindLabel(call);
   return (
     <button type="button" className="flow-row" onClick={() => onSelect(call)}>
-      <span className={`tag kind-${label.toLowerCase()}`}>{label}</span>
+      <span className={`tag ${serverCallKindClass(call)}`}>{label}</span>
       <span className={`method-label ${call.method.toLowerCase()}`}>{call.method}</span>
       <span className="p">{call.kind === 'client' ? `${serverCallHost(call)}${call.path}` : call.path}</span>
       <span className={`status-code ${statusTone(call)}`}>{call.statusCode ?? (call.error ? 'ERR' : '—')}</span>
@@ -78,7 +78,7 @@ export function ServerCallDetail({
       <div className="drawer-head preview-head">
         <div className="title">
           <div className="line">
-            <span className={`tag kind-${label.toLowerCase()}`}>{label}</span>
+            <span className={`tag ${serverCallKindClass(call)}`}>{label}</span>
             <span className={`method-label ${call.method.toLowerCase()}`}>{call.method}</span>
             <strong title={call.url}>{call.path || call.url}</strong>
           </div>
@@ -92,7 +92,7 @@ export function ServerCallDetail({
           {page && onSelectRelated ? (
             <div className="crumbs">
               <span>Part of</span>
-              <button onClick={() => select(page)} title={page.url}>{page.stage === 'middleware' ? 'middleware ' : ''}{page.path}</button>
+              <button onClick={() => select(page)} title={page.url}>{page.stage === 'middleware' ? 'middleware ' : page.layer ? `${page.layer.toUpperCase()} ` : page.kind === 'client' ? `${page.serviceName} → ` : ''}{page.path}</button>
             </div>
           ) : null}
         </div>
@@ -117,7 +117,7 @@ export function ServerCallDetail({
             <div className="facts">
               <div><span>Result</span><strong className={call.status === 'error' ? 'error-text' : ''}>{describeStatus(call)}</strong></div>
               <div><span>Time</span><strong>{Math.round(call.durationMs)} ms{call.bodyDurationMs !== null ? ` · body ${Math.round(call.bodyDurationMs)} ms` : ''}</strong></div>
-              <div><span>Service</span><strong title={call.serviceName}>{call.serviceName}</strong></div>
+              <div><span>{call.layer ? 'Called by' : 'Service'}</span><strong title={call.serviceName}>{call.serviceName}{call.layer ? ` → ${call.layer}` : ''}</strong></div>
               <div><span>Answered by</span><strong className={call.mockedBy ? 'mock-text' : ''}>{call.mockedBy ? `mock “${call.mockedBy}”` : call.cache === 'hit' ? 'Next cache' : call.kind === 'client' ? serverCallHost(call) : 'this server'}</strong></div>
             </div>
 
@@ -132,7 +132,7 @@ export function ServerCallDetail({
 
             {related && related.children.length && onSelectRelated ? (
               <>
-                <div className="kv-title">{call.stage === 'middleware' ? 'Calls the middleware made' : 'Backend calls made to answer it'} ({related.children.length})</div>
+                <div className="kv-title">{call.stage === 'middleware' ? 'Calls the middleware made' : call.kind === 'client' ? 'Calls it made, seen by the relay' : 'Backend calls made to answer it'} ({related.children.length})</div>
                 <div className="flow-list">{related.children.map((child) => <FlowRow key={child.spanId} call={child} onSelect={select} />)}</div>
               </>
             ) : null}

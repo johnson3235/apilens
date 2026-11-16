@@ -1,8 +1,25 @@
-# ApiLens Next SDK 0.5.0 — opt-in QA server tracing, payload capture and server mocking
+# ApiLens Next SDK 0.6.0 — opt-in QA server tracing, payload capture and server mocking
 
 Standalone Node 20+ package. No Next.js runtime dependency, no workspace dependencies, no Express custom server. This is a new adapter; `@apilens/node-sdk` is still the separate legacy Express/http SDK.
 
-## What is new in 0.5.0: "connected, but no server calls"
+## What is new in 0.6.0: the backend relay (JCS → TMF → OSB)
+
+The SDK sees the BFF and its calls to JCS. 0.6.0 adds **`apilens-relay`**, a forwarding proxy in
+front of the services JCS calls, so a tester's TMF, OSB and Vesta calls appear under the page that
+caused them, and any one of them can be answered by a mock. Configuration only: JCS's TMF base
+URLs point at the relay, and Spring passes the QA session on. Full guide:
+[docs/backend-relay.md](../../docs/backend-relay.md).
+
+| | 0.6.0 |
+|---|---|
+| Relay | `npx apilens-relay` / `node dist/relay-cli.js`, configured by environment (`APILENS_RELAY_ROUTES`, `APILENS_CONTROL_URL`, `APILENS_CONTROL_TOKEN`); `createRelay()` from `@apilens/next-sdk/relay` to embed it. Dockerfile and Kubernetes manifest in `infrastructure/relay`. |
+| Shared environments | Traffic without a QA session is streamed through untouched, never recorded or mocked. Mocks made from a relay call apply to the tester's own session by default. |
+| Session propagation | Outgoing calls to `propagateToOrigins` also carry W3C `baggage: x-qa-session-id=…`, which OpenTelemetry-instrumented backends pass on by default. The relay reads the session from the header or from baggage, and the trace from `traceparent` or B3. |
+| Control plane | `ingest` accepts the relay's status; `/health` lists **`relays`** (calls recorded, passed through, mocked, unreachable, dropped), and the extension's checklist explains what is missing. Calls carry **`layer`** (the relay route). |
+
+Upgrading needs no code change.
+
+## What was new in 0.5.0: "connected, but no server calls"
 
 A tester could link the extension, see it connected, and still get an empty list with no way to tell why. 0.5.0 makes the server explain itself, and closes the three gaps left open in 0.4.0.
 

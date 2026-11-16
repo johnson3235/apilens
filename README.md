@@ -77,6 +77,7 @@ The agent binds to loopback and requires its generated token.
 - [Technical assessment](docs/technical-assessment.md)
 - [Architecture](docs/architecture.md)
 - [Extension](docs/extension.md)
+- [Backend relay: JCS → TMF → OSB calls](docs/backend-relay.md)
 - [Local agent](docs/local-agent.md)
 - [Tracing](docs/tracing.md)
 - [Mocking](docs/mocking.md)

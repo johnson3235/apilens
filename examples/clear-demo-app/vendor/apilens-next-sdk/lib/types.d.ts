@@ -75,6 +75,11 @@ export interface ServerCall {
     middlewareSpanId?: string | null;
     /** `hit` when Next answered the fetch from its own cache (or deduplicated it) and no backend call was made. */
     cache?: 'hit' | null;
+    /**
+     * Set by the ApiLens relay (0.6+): the route it forwarded this call through,
+     * such as `tmf622`, naming the backend service behind it.
+     */
+    layer?: string | null;
 }
 export type MockMatchType = 'glob' | 'regex' | 'contains' | 'equals' | 'startsWith';
 export interface ServerMockMatch {
@@ -167,6 +172,30 @@ export interface ControlHealth {
     };
     /** What the request hook saw and why it skipped requests (optional for older SDKs). */
     capture?: CaptureStats;
+    /** ApiLens relays that delivered calls in the last few minutes (0.6+). */
+    relays?: RelayStatus[];
+}
+/**
+ * What an ApiLens relay (between a backend and the services it calls) reports
+ * with each delivery. Counters are since the relay started.
+ */
+export interface RelayStatus {
+    name: string;
+    version: string;
+    /** Route names, such as `tmf622`; never the upstream addresses. */
+    routes: string[];
+    /** True when traffic without a QA session is passed through untouched and never recorded or mocked. */
+    sharedEnvironment: boolean;
+    forwarded: number;
+    /** Requests that carried a QA session and were recorded. */
+    captured: number;
+    /** Requests without a QA session; on a shared environment these were not recorded. */
+    unattributed: number;
+    mocked: number;
+    upstreamErrors: number;
+    /** Calls the relay could not deliver to this app. */
+    dropped: number;
+    lastSeenAt: number;
 }
 /**
  * Answers "connected, but why is nothing showing?" from the server's side.

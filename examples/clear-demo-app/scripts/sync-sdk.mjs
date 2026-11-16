@@ -27,6 +27,7 @@ writeFileSync(join(target, 'package.json'), `${JSON.stringify({
   exports: {
     '.': { types: './lib/index.d.ts', default: './lib/index.js' },
     './edge': { types: './lib/edge.d.ts', default: './lib/edge.js' },
+    './relay': { types: './lib/relay.d.ts', default: './lib/relay.js' },
     './package.json': './package.json',
   },
   engines: source.engines,

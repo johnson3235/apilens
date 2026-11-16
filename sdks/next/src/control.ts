@@ -50,7 +50,7 @@ export interface ControlContext {
   rulesRevision: () => string;
   clearCalls: () => void;
   /** Stores calls relayed by another process of the same app; returns how many were kept. */
-  ingest: (calls: unknown[]) => number;
+  ingest: (calls: unknown[], relay?: unknown) => number;
   /** Counts rule applications that happened in another process, so apply budgets hold. */
   consume: (ruleIds: string[]) => void;
 }
@@ -194,7 +194,8 @@ export function createControlHandler(context: ControlContext): (request: Request
         if (!Array.isArray(calls) || calls.length > MAX_RELAY_BATCH) {
           return reply(request, 400, { error: `Expected a calls array of at most ${MAX_RELAY_BATCH}.` });
         }
-        return reply(request, 200, { accepted: context.ingest(calls), processId: context.processId });
+        const relay = (payload as { relay?: unknown }).relay;
+        return reply(request, 200, { accepted: context.ingest(calls, relay), processId: context.processId });
       }
 
       if (operation === 'consume' && request.method === 'POST') {

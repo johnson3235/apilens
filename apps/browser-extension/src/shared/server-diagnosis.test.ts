@@ -76,3 +76,30 @@ describe('diagnoseCapture', () => {
     expect(result.checks.find((check) => check.id === 'traffic')?.detail).toContain('2 server pods');
   });
 });
+
+describe('relay diagnosis', () => {
+  const relay = (overrides: Record<string, unknown> = {}) => ({
+    name: 'jcs-relay', version: '0.6.0', routes: ['tmf622', 'osb'], sharedEnvironment: true,
+    forwarded: 10, captured: 4, unattributed: 6, mocked: 1, upstreamErrors: 0, dropped: 0, lastSeenAt: Date.now(), ...overrides,
+  });
+
+  it('asks for the Spring config when no call through the relay carries a QA session', () => {
+    const result = diagnoseCapture(status({ relays: [relay({ captured: 0, mocked: 0 })] }), 0)!;
+    const check = result.checks.find((item) => item.id === 'relay:jcs-relay')!;
+    expect(check.state).toBe('warn');
+    expect(check.fix).toContain('remote-fields: x-qa-session-id');
+    expect(result.headline).toBe(check.title);
+  });
+
+  it('confirms a working relay, including what it left alone', () => {
+    const check = diagnoseCapture(status({ relays: [relay()] }), 3)!.checks.find((item) => item.id === 'relay:jcs-relay')!;
+    expect(check).toMatchObject({ state: 'ok', title: 'Relay jcs-relay: 4 calls recorded' });
+    expect(check.detail).toContain('TMF622, OSB');
+    expect(check.detail).toContain('6 from other squads passed through untouched');
+  });
+
+  it('warns when the relay lost captures', () => {
+    const checks = diagnoseCapture(status({ relays: [relay({ dropped: 3 })] }), 3)!.checks;
+    expect(checks.find((item) => item.id === 'relay-dropped:jcs-relay')?.state).toBe('warn');
+  });
+});

@@ -1,7 +1,7 @@
 {
   "name": "@apilens/next-sdk",
-  "version": "0.5.0",
-  "description": "Opt-in Node-runtime and Edge-middleware capture, payload inspection and server mocking for ApiLens (vendored copy for the CLEAR demo app)",
+  "version": "0.6.0",
+  "description": "Opt-in Node-runtime and Edge-middleware capture, payload inspection and server mocking for ApiLens, plus a relay for backends such as Spring services (vendored copy for the CLEAR demo app)",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {
@@ -12,6 +12,10 @@
     "./edge": {
       "types": "./lib/edge.d.ts",
       "default": "./lib/edge.js"
+    },
+    "./relay": {
+      "types": "./lib/relay.d.ts",
+      "default": "./lib/relay.js"
     },
     "./package.json": "./package.json"
   },

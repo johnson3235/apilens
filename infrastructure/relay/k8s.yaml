@@ -1,0 +1,71 @@
+# ApiLens relay for a shared dev/staging namespace. Never deploy to production.
+# Replace the TMF/OSB/Vesta addresses with the ones JCS uses today, and the app address with the
+# CLEAR BFF the extension connects to.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: apilens-relay
+type: Opaque
+stringData:
+  # The same value as APILENS_CONTROL_TOKEN in the CLEAR app.
+  APILENS_CONTROL_TOKEN: "<same token as the app>"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apilens-relay
+  labels: { app: apilens-relay }
+spec:
+  # Two replicas: every squad's JCS → TMF traffic goes through it.
+  replicas: 2
+  selector:
+    matchLabels: { app: apilens-relay }
+  template:
+    metadata:
+      labels: { app: apilens-relay }
+    spec:
+      containers:
+        - name: relay
+          image: <your-registry>/apilens-relay:0.6.0
+          ports: [{ containerPort: 8080 }]
+          env:
+            - name: APILENS_RELAY_NAME
+              value: jcs-relay
+            - name: APILENS_RELAY_CALLER
+              value: jcs
+            # route=real address. JCS calls http://apilens-relay:8080/<route>/... instead.
+            - name: APILENS_RELAY_ROUTES
+              value: >-
+                tmf622=https://tmf622.dev.internal,
+                tmf629=https://tmf629.dev.internal,
+                tmf666=https://tmf666.dev.internal,
+                osb=https://osb.dev.internal,
+                vesta=https://vesta.dev.internal
+            # Routes the TMF services call (not JCS), so OSB/Vesta calls nest under the TMF call.
+            - name: APILENS_RELAY_CALLERS
+              value: osb=tmf,vesta=tmf
+            - name: APILENS_CONTROL_URL
+              value: https://clear-dev.example.com/api/__apilens
+            - name: APILENS_CONTROL_TOKEN
+              valueFrom: { secretKeyRef: { name: apilens-relay, key: APILENS_CONTROL_TOKEN } }
+            # Internal CA for https upstreams, if they use one:
+            # - name: NODE_EXTRA_CA_CERTS
+            #   value: /etc/ssl/internal/ca.pem
+          readinessProbe:
+            httpGet: { path: /__relay/ready, port: 8080 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /__relay/health, port: 8080 }
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { memory: 384Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apilens-relay
+spec:
+  selector: { app: apilens-relay }
+  ports: [{ port: 8080, targetPort: 8080 }]
+# In-cluster only: no Ingress. The relay forwards without authentication, like the services behind it.

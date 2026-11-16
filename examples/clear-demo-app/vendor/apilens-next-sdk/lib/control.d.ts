@@ -22,7 +22,7 @@ export interface ControlContext {
     rulesRevision: () => string;
     clearCalls: () => void;
     /** Stores calls relayed by another process of the same app; returns how many were kept. */
-    ingest: (calls: unknown[]) => number;
+    ingest: (calls: unknown[], relay?: unknown) => number;
     /** Counts rule applications that happened in another process, so apply budgets hold. */
     consume: (ruleIds: string[]) => void;
 }
