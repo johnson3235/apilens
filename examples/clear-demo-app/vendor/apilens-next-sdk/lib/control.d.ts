@@ -1,4 +1,5 @@
 import type { CallBuffer } from './buffer';
+import { type TraceOwner } from './trace-registry';
 import type { ControlHealth, ControlPlaneOptions, ServerMockRule } from './types';
 /**
  * The in-app control plane.
@@ -12,6 +13,8 @@ import type { ControlHealth, ControlPlaneOptions, ServerMockRule } from './types
  * caller and captured traffic.
  */
 export declare const MIN_TOKEN_LENGTH = 24;
+/** How far back the rules answer lists traces, for relays to learn testers' traces ahead of their calls. */
+export declare const RECENT_TRACES_MS = 60000;
 export interface ControlContext {
     options: ControlPlaneOptions;
     processId: string;
@@ -25,6 +28,10 @@ export interface ControlContext {
     ingest: (calls: unknown[], relay?: unknown) => number;
     /** Counts rule applications that happened in another process, so apply budgets hold. */
     consume: (ruleIds: string[]) => void;
+    /** The QA session a propagated trace belongs to, for a relay whose backend dropped the session header. */
+    traceOwner?: (traceId: string) => TraceOwner | null;
+    /** Traces propagated recently, sent to relays with the rules. */
+    recentTraces?: () => TraceOwner[];
 }
 /** Most calls accepted in one relay request. */
 export declare const MAX_RELAY_BATCH = 50;

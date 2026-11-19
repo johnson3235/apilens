@@ -11,7 +11,7 @@ import {
   type CaptureOutcome,
 } from './bodies';
 import { CallBuffer, DEFAULT_MAX_BUFFER_BYTES } from './buffer';
-import { buildRulesRevision, controlMountPath, createControlHandler, isTokenAcceptable, MIN_TOKEN_LENGTH, parseExpiry } from './control';
+import { buildRulesRevision, controlMountPath, createControlHandler, isTokenAcceptable, MIN_TOKEN_LENGTH, parseExpiry, RECENT_TRACES_MS } from './control';
 import {
   BodyTap, clearRequestHook, decodeBody, nodeHeaders, setRequestHook, tapRequest, tapWrites, trackResponseHeaders, type RequestHook,
 } from './incoming';
@@ -21,6 +21,7 @@ import {
 } from './outgoing';
 import { applyFieldMutations, buildMockResponse, headerSafe, MockNetworkError, sanitizeRule, selectMockRule } from './mocks';
 import { redactHeaders, safeUrlParts } from './redaction';
+import { TraceRegistry } from './trace-registry';
 import { CONTROL_PROTOCOL_VERSION, MIDDLEWARE_HEADER } from './types';
 import type {
   AutoInstrumentOptions,
@@ -301,6 +302,8 @@ export class ApiLensNextSDK {
   private servedControl = false;
   private relayFailures = 0;
   private readonly relays = new Map<string, RelayStatus>();
+  /** Traces this process passed on for a tester, so a relay further down can tell whose call it sees. */
+  private readonly traces = new TraceRegistry();
   private lastRelayError: string | null = null;
   private readonly auto: AutoInstrumentOptions | null;
   private requestHook: RequestHook | null = null;
@@ -413,6 +416,8 @@ export class ApiLensNextSDK {
           consume: (ruleIds) => {
             for (const rule of this.rules) if (ruleIds.includes(rule.id)) rule.appliedCount += 1;
           },
+          traceOwner: (traceId) => this.traces.lookup(traceId),
+          recentTraces: () => this.traces.recent(RECENT_TRACES_MS),
         })
       : null;
 
@@ -462,6 +467,10 @@ export class ApiLensNextSDK {
       capture: { ...this.stats, skipped: { ...this.stats.skipped }, learnedOrigins: [...this.learnedOrigins] },
       relays: this.liveRelays(),
     };
+  }
+
+  private rememberTrace(ctx: Context): void {
+    if (ctx.sessionId !== AMBIENT_SESSION_ID) this.traces.register(ctx.traceId, ctx.sessionId, ctx.scenarioId);
   }
 
   /** Relays heard from recently, most recent first. */
@@ -890,6 +899,7 @@ export class ApiLensNextSDK {
         const baggage = withSessionBaggage(request.getHeader('baggage'), ctx.sessionId);
         if (baggage) request.setHeader('baggage', baggage);
         if (ctx.scenarioId) request.setHeader('x-test-scenario-id', ctx.scenarioId);
+        this.rememberTrace(ctx);
       }
     } catch {
       // A URL that does not parse never matches a propagation origin.
@@ -1037,6 +1047,7 @@ export class ApiLensNextSDK {
         const baggage = withSessionBaggage(headers.get('baggage'), ctx.sessionId);
         if (baggage) headers.set('baggage', baggage);
         if (ctx.scenarioId) headers.set('x-test-scenario-id', ctx.scenarioId);
+        this.rememberTrace(ctx);
         outgoing = { ...init, headers }; // Keep body, signal, cache, next and duplex untouched.
       }
     } catch {
@@ -1627,6 +1638,7 @@ function relayStatus(raw: unknown): RelayStatus | null {
     forwarded: count('forwarded'),
     captured: count('captured'),
     unattributed: count('unattributed'),
+    traced: count('traced'),
     mocked: count('mocked'),
     upstreamErrors: count('upstreamErrors'),
     dropped: count('dropped'),

@@ -29,6 +29,7 @@ try {
         sharedEnvironment: env.APILENS_RELAY_SHARED !== 'false',
         captureBodies: { maxBytes: number(env.APILENS_RELAY_MAX_BODY_BYTES), redactKeys: list(env.APILENS_RELAY_REDACT_KEYS) },
         maxRequestBytes: number(env.APILENS_RELAY_MAX_REQUEST_BYTES),
+        attributionTimeoutMs: number(env.APILENS_RELAY_ATTRIBUTION_TIMEOUT_MS),
         log: (line) => console.log(`[apilens-relay] ${line}`),
     });
 }

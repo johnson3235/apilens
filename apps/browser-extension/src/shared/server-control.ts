@@ -150,6 +150,8 @@ export interface ServerRelayStatus {
   forwarded: number;
   captured: number;
   unattributed: number;
+  /** Recorded calls recognised by their trace id, the backend having dropped the session header (relay 0.7.0+). */
+  traced?: number;
   mocked: number;
   upstreamErrors: number;
   dropped: number;

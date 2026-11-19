@@ -1,0 +1,10 @@
+# In-cluster only: no Ingress. The relay forwards without authentication, like the services behind it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "relay.fullname" . }}
+  labels: {{- include "relay.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "relay.selector" . | nindent 4 }}
+  ports:
+    - { name: http, port: {{ .Values.service.port }}, targetPort: http }

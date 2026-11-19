@@ -1,0 +1,6 @@
+apiVersion: v2
+name: apilens-relay
+description: ApiLens relay. Records and mocks a tester's backend → TMF/OSB/Vesta calls on a shared dev environment. Never for production.
+type: application
+version: 0.7.0
+appVersion: "0.7.0"

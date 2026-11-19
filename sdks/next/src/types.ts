@@ -210,6 +210,11 @@ export interface RelayStatus {
   captured: number;
   /** Requests without a QA session; on a shared environment these were not recorded. */
   unattributed: number;
+  /**
+   * Of the recorded calls, those recognised by their trace id because the
+   * backend dropped the session header but continued the tester's trace.
+   */
+  traced?: number;
   mocked: number;
   upstreamErrors: number;
   /** Calls the relay could not deliver to this app. */

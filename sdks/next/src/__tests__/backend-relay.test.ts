@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import http, { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { gunzipSync, gzipSync } from 'node:zlib';
@@ -32,10 +32,10 @@ async function listen(server: Server): Promise<string> {
 }
 
 /** The app the extension connects to. */
-async function app(): Promise<{ base: string; sdk: ApiLensNextSDK }> {
+async function app(propagateToOrigins: string[] = []): Promise<{ base: string; sdk: ApiLensNextSDK }> {
   const sdk = new ApiLensNextSDK({
     serviceName: 'clear-bff', enabled: true, reportToAgent: false, allowedAppOrigins: ['*'],
-    captureBodies: { request: true, response: true }, control: { enabled: true, token },
+    captureBodies: { request: true, response: true }, control: { enabled: true, token }, propagateToOrigins,
   });
   instances.push(sdk);
   // The app and the relay share this test process; in production they never do. Without this the
@@ -278,6 +278,12 @@ describe('relay configuration', () => {
     expect(from({ b3: `${TRACE}-${PARENT}-1` })).toEqual({ traceId: TRACE, spanId: PARENT });
     expect(from({ 'x-b3-traceid': '8448eb211c80319c', 'x-b3-spanid': PARENT })).toEqual({ traceId: '00000000000000008448eb211c80319c', spanId: PARENT });
     expect(from({ traceparent: 'garbage' })).toBeNull();
+    // Datadog: decimal low 64 bits, high 64 bits in _dd.p.tid.
+    const low = BigInt(`0x${TRACE.slice(16)}`).toString();
+    const parent = BigInt(`0x${PARENT}`).toString();
+    expect(from({ 'x-datadog-trace-id': low, 'x-datadog-parent-id': parent, 'x-datadog-tags': `_dd.p.dm=-1,_dd.p.tid=${TRACE.slice(0, 16)}` })).toEqual({ traceId: TRACE, spanId: PARENT });
+    expect(from({ 'x-datadog-trace-id': low, 'x-datadog-parent-id': parent })).toEqual({ traceId: `${'0'.repeat(16)}${TRACE.slice(16)}`, spanId: PARENT });
+    expect(from({ 'x-datadog-trace-id': '18446744073709551616', 'x-datadog-parent-id': parent })).toBeNull();
   });
 
   it('adds the session to baggage once, keeping what is there', () => {
@@ -303,5 +309,134 @@ describe('relay when the backend gives up', () => {
     request.destroy();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect((await recorded(sdk))[0]).toMatchObject({ statusCode: null, mockedBy: 'TMF622 down', error: expect.stringContaining('closed the connection') });
+  });
+});
+
+
+/**
+ * A Quarkus service with the Datadog agent: it continues the BFF's trace but
+ * drops x-qa-session-id and baggage on the way to the TMFs.
+ */
+async function quarkusJcs(relayUrl: () => string, style: 'w3c' | 'datadog'): Promise<string> {
+  return listen(createServer(async (req, res) => {
+    for await (const _ of req) void _;
+    const parent = /^00-([\da-f]{32})-/.exec(String(req.headers.traceparent ?? ''));
+    const traceId = parent?.[1] ?? '1'.repeat(32);
+    const span = 'c0ffee00c0ffee00';
+    const headers: Record<string, string> = style === 'w3c'
+      ? { traceparent: `00-${traceId}-${span}-01` }
+      // Datadog-only propagation and no 128-bit tag: only the low 64 bits survive.
+      : { 'x-datadog-trace-id': BigInt(`0x${traceId.slice(16)}`).toString(), 'x-datadog-parent-id': BigInt(`0x${span}`).toString() };
+    const answer = await send(`${relayUrl()}/tmf678/customerBill?billingAccount=7`, { headers });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ tmfStatus: answer.status, tmfBody: answer.body.length }));
+  }));
+}
+
+const control = (sdk: ApiLensNextSDK, path: string) =>
+  sdk.handleControlRequest(new Request(`http://app.test/api/__apilens/${path}`, { headers: { authorization: `Bearer ${token}` } }));
+
+async function bffCall(sdk: ApiLensNextSDK, jcs: string, session = 'qa-sara'): Promise<{ tmfStatus: number }> {
+  const handler = sdk.wrapRoute(async () => fetch(`${jcs}/bill-analysis`));
+  const response = await handler(new Request('http://app.test/api/bills', { headers: { 'x-qa-session-id': session } }), undefined);
+  return response.json();
+}
+
+describe('relay behind a backend that drops the session header', () => {
+  it.each(['w3c', 'datadog'] as const)('recognises the tester from the trace (%s headers) and nests the call on the BFF trace', async (style) => {
+    let relayUrl = '';
+    const jcs = await quarkusJcs(() => relayUrl, style);
+    const { base, sdk } = await app([jcs]);
+    const upstream = await tmf({ status: 200, json: { id: 'BILL-1' } });
+    relayUrl = await relay({ tmf678: upstream.base }, base);
+    // The tester's extension is connected: the app tells the relay someone is testing.
+    await control(sdk, 'calls?since=0');
+    await relayInstance().refreshRules();
+
+    expect(await bffCall(sdk, jcs)).toEqual({ tmfStatus: 200, tmfBody: expect.any(Number) });
+
+    const calls = await recorded(sdk);
+    const bff = calls.find((call) => call.url.startsWith(jcs))!;
+    const tmfCall = calls.find((call) => call.layer === 'tmf678')!;
+    expect(tmfCall).toMatchObject({ sessionId: 'qa-sara', traceId: bff.traceId, path: '/customerBill' });
+    expect(upstream.seen[0]!.headers['x-qa-session-id']).toBeUndefined(); // Nothing added on the way.
+    expect(relayInstance().status()).toMatchObject({ captured: 1, traced: 1, unattributed: 0 });
+  });
+
+  it('applies the tester’s mock to their traced call only', async () => {
+    let relayUrl = '';
+    const jcs = await quarkusJcs(() => relayUrl, 'datadog');
+    const { base, sdk } = await app([jcs]);
+    const upstream = await tmf({ status: 200 });
+    relayUrl = await relay({ tmf678: upstream.base }, base);
+    sdk.setServerMockRules([rule({
+      name: 'Bill 500', match: { method: 'GET', urlPattern: '*/customerBill*', matchType: 'glob', kind: 'client', sessionId: 'qa-sara' },
+      action: { type: 'status-code', statusCode: 500 },
+    })]);
+    await relayInstance().refreshRules();
+
+    expect(await bffCall(sdk, jcs, 'qa-sara')).toMatchObject({ tmfStatus: 500 });
+    expect(await bffCall(sdk, jcs, 'qa-omar')).toMatchObject({ tmfStatus: 200 });
+    // Another squad's request, on its own trace.
+    const other = await send(`${relayUrl}/tmf678/customerBill`, { headers: { traceparent: `00-${'ab'.repeat(16)}-${PARENT}-01` } });
+    expect(other.status).toBe(200);
+    expect(upstream.seen).toHaveLength(2);
+  });
+
+  it('never looks anything up while no one is testing, and asks once per unknown trace', async () => {
+    const { base, sdk } = await app();
+    const upstream = await tmf();
+    const url = await relay({ tmf678: upstream.base }, base);
+    const spy = vi.spyOn(sdk, 'handleControlRequest');
+    const lookups = () => spy.mock.calls.filter(([request]) => new URL(request.url).pathname.endsWith('/attribution')).length;
+    const squad = { traceparent: `00-${'cd'.repeat(16)}-${PARENT}-01` };
+
+    await send(`${url}/tmf678/customerBill`, { headers: squad });
+    expect(lookups()).toBe(0);
+
+    await control(sdk, 'calls?since=0');
+    await relayInstance().refreshRules();
+    await send(`${url}/tmf678/customerBill`, { headers: squad });
+    await send(`${url}/tmf678/customerBill`, { headers: squad });
+    expect(lookups()).toBe(1);
+    expect(await recorded(sdk)).toHaveLength(0);
+    expect(upstream.seen).toHaveLength(3);
+  });
+
+  it('passes the call through when the app is too slow to answer', async () => {
+    const { base, sdk } = await app();
+    const upstream = await tmf();
+    const instance = new ApiLensRelay({ routes: { tmf678: upstream.base }, control: { url: base, token }, attributionTimeoutMs: 50, flushIntervalMs: 60_000, rulesIntervalMs: 60_000 });
+    relays.push(instance);
+    const url = `http://127.0.0.1:${((await instance.listen(0, '127.0.0.1')).address() as AddressInfo).port}`;
+    await control(sdk, 'calls?since=0');
+    await instance.refreshRules();
+    const original = sdk.handleControlRequest.bind(sdk);
+    vi.spyOn(sdk, 'handleControlRequest').mockImplementation(async (request) => {
+      if (new URL(request.url).pathname.endsWith('/attribution')) await new Promise((resolve) => setTimeout(resolve, 500));
+      return original(request);
+    });
+    const started = Date.now();
+    const response = await send(`${url}/tmf678/customerBill`, { headers: { traceparent: `00-${TRACE}-${PARENT}-01` } });
+    expect(response.status).toBe(201);
+    expect(Date.now() - started).toBeLessThan(400);
+  });
+
+  it('answers whose trace it is only with the token and a valid id', async () => {
+    let relayUrl = '';
+    const jcs = await quarkusJcs(() => relayUrl, 'w3c');
+    const { sdk } = await app([jcs]);
+    const upstream = await tmf();
+    relayUrl = upstream.base; // No relay: only the BFF side matters here.
+    await bffCall(sdk, jcs);
+    const traceId = sdk.calls()[0]!.traceId;
+    const found = await (await control(sdk, `attribution?trace=${traceId.slice(16)}`)).json();
+    expect(found.owner).toMatchObject({ traceId, sessionId: 'qa-sara' });
+    expect((await (await control(sdk, `attribution?trace=${'9'.repeat(32)}`)).json()).owner).toBeNull();
+    expect((await control(sdk, 'attribution?trace=xyz')).status).toBe(400);
+    const anonymous = await sdk.handleControlRequest(new Request(`http://app.test/api/__apilens/attribution?trace=${traceId}`));
+    expect(anonymous.status).toBe(401);
+    const rules = await (await control(sdk, 'rules')).json();
+    expect(rules).toMatchObject({ testerActive: true, traces: [expect.objectContaining({ sessionId: 'qa-sara' })] });
   });
 });

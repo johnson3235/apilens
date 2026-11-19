@@ -11,9 +11,13 @@ import type { BodyCaptureOptions, RelayStatus } from './types';
  * delivered to the app's control plane, where the extension shows them under
  * the page that caused them, and can be answered by a server mock instead.
  *
- * On a shared environment (the default) a request without a QA session is
- * piped straight through: never buffered, recorded or mocked. Other squads'
- * traffic sees a plain proxy.
+ * A backend that drops the session header but continues the tester's trace
+ * (Datadog, OpenTelemetry, Brave…) is handled too: while a tester is active
+ * the relay asks the app which session a trace belongs to.
+ *
+ * On a shared environment (the default) a request that belongs to no QA
+ * session is piped straight through: never buffered, recorded or mocked.
+ * Other squads' traffic sees a plain proxy.
  */
 export interface RelayRoute {
     /** First path segment the backend calls, such as `tmf622`. Shown in the extension. */
@@ -59,15 +63,32 @@ export interface RelayOptions {
     heartbeatMs?: number;
     /** Calls held while the control plane is unreachable before the oldest are dropped. Default 1000. */
     maxQueue?: number;
+    /**
+     * Longest wait for the app to say whose trace a request belongs to, when the
+     * backend dropped the session header. On timeout the request is passed
+     * through as another squad's. Default 300 ms.
+     */
+    attributionTimeoutMs?: number;
     log?: (line: string) => void;
 }
 /** `x-qa-session-id` as a header, or as a W3C baggage entry (OpenTelemetry propagates baggage by default). */
 export declare function sessionFromHeaders(req: IncomingMessage): string | undefined;
-/** The caller's trace: W3C first, then B3. */
+/** The caller's trace: W3C first, then B3, then Datadog. */
 export declare function traceFromHeaders(req: IncomingMessage): {
     traceId: string;
     spanId: string;
 } | null;
+/** Whose request this is, and how the relay knows. */
+interface Identity {
+    sessionId: string;
+    scenarioId: string | null;
+    trace: {
+        traceId: string;
+        spanId: string;
+    } | null;
+    attributed: boolean;
+    byTrace: boolean;
+}
 interface ResolvedRoute {
     base: URL;
     caller: string | null;
@@ -100,6 +121,11 @@ export declare class ApiLensRelay {
     /** Calls whose response is still on its way, so flush() can wait for them. */
     private readonly open;
     private readonly stats;
+    /** Trace key → its tester (or null: not a tester's), with when that answer expires. */
+    private readonly owners;
+    private readonly lookups;
+    private lookupWindow;
+    private testerSeenAt;
     constructor(options: RelayOptions);
     status(): Omit<RelayStatus, 'lastSeenAt'>;
     get lastError(): string | null;
@@ -109,6 +135,14 @@ export declare class ApiLensRelay {
     start(): void;
     close(): Promise<void>;
     handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
+    /**
+     * The QA session of a request: its own header (or baggage) first; failing
+     * that, the tester whose trace it continues. Never throws or waits longer
+     * than `attributionTimeoutMs`.
+     */
+    identify(req: IncomingMessage): Promise<Identity>;
+    private ownerOf;
+    private remember;
     private pending;
     private transport;
     private upstreamFailed;

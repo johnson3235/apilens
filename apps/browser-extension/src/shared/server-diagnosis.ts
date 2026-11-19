@@ -148,14 +148,22 @@ export function diagnoseCapture(status: ServerBridgeStatus | null, visibleCalls:
   return summarise(checks, visibleCalls);
 }
 
-/** Spring Boot 3 settings that carry the QA session from the BFF on to the services JCS calls. */
-export const SPRING_SESSION_PROPAGATION = `# application-dev.yml of the backend (Spring Boot 3 with micrometer-tracing)
-management:
-  tracing:
-    propagation:
-      type: w3c
-    baggage:
-      remote-fields: x-qa-session-id, x-test-scenario-id`;
+/**
+ * Settings that let the relay recognise a tester's calls: the backend has to
+ * continue the BFF's trace (the relay then asks the app whose trace it is), or
+ * pass the QA session header on. One of them is enough.
+ */
+export const BACKEND_SESSION_PROPAGATION = `# One of these, on the backend between the BFF and the relay (dev only):
+
+# Datadog agent (any stack, such as Quarkus): continue the BFF's W3C trace
+DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext
+
+# Spring Boot 3 (micrometer-tracing), application-dev.yml
+management.tracing.propagation.consume: w3c, b3
+management.tracing.baggage.remote-fields: x-qa-session-id, x-test-scenario-id
+
+# Quarkus REST Client with the default headers factory, application.properties
+org.eclipse.microprofile.rest.client.propagateHeaders=x-qa-session-id,x-test-scenario-id,traceparent`;
 
 /** What each ApiLens relay in front of a backend (JCS → TMF, TMF → OSB) reported. */
 function relayChecks(relays: NonNullable<NonNullable<ServerBridgeStatus['health']>['relays']>): DiagnosisCheck[] {
@@ -175,16 +183,16 @@ function relayChecks(relays: NonNullable<NonNullable<ServerBridgeStatus['health'
         state: 'warn',
         title: `${plural(relay.unattributed, 'call')} went through relay ${relay.name}, none of them from a QA session`,
         detail: relay.sharedEnvironment
-          ? 'The backend does not pass your QA session on to the services it calls, so the relay cannot tell your calls from other squads’ and leaves them alone. Ask the backend team to add this config; no code changes.'
+          ? 'The backend neither continues your trace nor passes your QA session on, so the relay cannot tell your calls from other squads’ and leaves them alone. Ask the backend team for one of these settings; no code changes.'
           : 'The backend does not pass your QA session on, so these calls are recorded under the shared session.',
-        fix: SPRING_SESSION_PROPAGATION,
+        fix: BACKEND_SESSION_PROPAGATION,
       });
     } else {
       checks.push({
         id: `relay:${relay.name}`,
         state: 'ok',
         title: `Relay ${relay.name}: ${plural(relay.captured, 'call')} recorded`,
-        detail: `${routes}${relay.mocked ? ` · ${relay.mocked} answered by mocks` : ''}${relay.upstreamErrors ? ` · ${plural(relay.upstreamErrors, 'call')} could not reach the service` : ''}${relay.unattributed ? ` · ${relay.unattributed} from other squads passed through untouched` : ''}`,
+        detail: `${routes}${relay.traced ? ` · ${relay.traced} recognised by their trace` : ''}${relay.mocked ? ` · ${relay.mocked} answered by mocks` : ''}${relay.upstreamErrors ? ` · ${plural(relay.upstreamErrors, 'call')} could not reach the service` : ''}${relay.unattributed ? ` · ${relay.unattributed} from other squads passed through untouched` : ''}`,
       });
     }
     if (relay.dropped > 0) {
