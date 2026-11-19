@@ -27,6 +27,7 @@ const incoming_1 = require("./incoming");
 const outgoing_1 = require("./outgoing");
 const mocks_1 = require("./mocks");
 const redaction_1 = require("./redaction");
+const trace_registry_1 = require("./trace-registry");
 const types_1 = require("./types");
 __exportStar(require("./types"), exports);
 var bodies_2 = require("./bodies");
@@ -271,6 +272,8 @@ class ApiLensNextSDK {
     servedControl = false;
     relayFailures = 0;
     relays = new Map();
+    /** Traces this process passed on for a tester, so a relay further down can tell whose call it sees. */
+    traces = new trace_registry_1.TraceRegistry();
     lastRelayError = null;
     auto;
     requestHook = null;
@@ -390,6 +393,8 @@ class ApiLensNextSDK {
                         if (ruleIds.includes(rule.id))
                             rule.appliedCount += 1;
                 },
+                traceOwner: (traceId) => this.traces.lookup(traceId),
+                recentTraces: () => this.traces.recent(control_1.RECENT_TRACES_MS),
             })
             : null;
         if (this.issues.length) {
@@ -436,6 +441,10 @@ class ApiLensNextSDK {
             capture: { ...this.stats, skipped: { ...this.stats.skipped }, learnedOrigins: [...this.learnedOrigins] },
             relays: this.liveRelays(),
         };
+    }
+    rememberTrace(ctx) {
+        if (ctx.sessionId !== exports.AMBIENT_SESSION_ID)
+            this.traces.register(ctx.traceId, ctx.sessionId, ctx.scenarioId);
     }
     /** Relays heard from recently, most recent first. */
     liveRelays() {
@@ -881,6 +890,7 @@ class ApiLensNextSDK {
                     request.setHeader('baggage', baggage);
                 if (ctx.scenarioId)
                     request.setHeader('x-test-scenario-id', ctx.scenarioId);
+                this.rememberTrace(ctx);
             }
         }
         catch {
@@ -1024,6 +1034,7 @@ class ApiLensNextSDK {
                     headers.set('baggage', baggage);
                 if (ctx.scenarioId)
                     headers.set('x-test-scenario-id', ctx.scenarioId);
+                this.rememberTrace(ctx);
                 outgoing = { ...init, headers }; // Keep body, signal, cache, next and duplex untouched.
             }
         }
@@ -1575,6 +1586,7 @@ function relayStatus(raw) {
         forwarded: count('forwarded'),
         captured: count('captured'),
         unattributed: count('unattributed'),
+        traced: count('traced'),
         mocked: count('mocked'),
         upstreamErrors: count('upstreamErrors'),
         dropped: count('dropped'),

@@ -2,7 +2,24 @@
 
 Standalone Node 20+ package. No Next.js runtime dependency, no workspace dependencies, no Express custom server. This is a new adapter; `@apilens/node-sdk` is still the separate legacy Express/http SDK.
 
-## What is new in 0.6.0: the backend relay (JCS → TMF → OSB)
+## What is new in 0.7.0: no session header needed behind the backend
+
+0.6.0 needed the backend (JCS) to pass `x-qa-session-id` on to the services it calls. Many do not,
+and changing that can mean a shared library. 0.7.0 drops the requirement: a backend that only
+**continues the trace** (Datadog, OpenTelemetry or Brave, usually already the case) is enough.
+
+| | 0.7.0 |
+|---|---|
+| Trace attribution | The SDK remembers each trace it passes on for a tester. When a call reaches the relay with no session, the relay asks the app (`GET attribution?trace=…`) whose trace it is, then records it, or answers it from that tester's mock, as if the header were there. Testers' recent traces also come with the rules the relay polls, so most calls need no lookup. |
+| Other squads | Lookups only happen while a tester is active (the extension connected, or a trace passed on in the last 15 minutes), once per unknown trace, at most 20 a second, with a 300 ms limit (`APILENS_RELAY_ATTRIBUTION_TIMEOUT_MS`). Otherwise the call is streamed through as before, unrecorded and never mocked. Lookups have their own rate budget, so they never slow the extension's polling. |
+| Datadog headers | The relay reads `x-datadog-trace-id` / `x-datadog-parent-id` (and `_dd.p.tid` for 128-bit traces) besides `traceparent` and B3. Calls known by 64 bits only are put back on the BFF's full trace, so they still nest under the page. |
+| Install | Ready image `ghcr.io/johnson3235/apilens-relay:0.7.0` (amd64 and arm64, runs as uid 1000 with a read-only filesystem), and a Helm chart, `oci://ghcr.io/johnson3235/charts/apilens-relay`, for Argo CD: routes and caller in values, token from an existing Secret, two replicas, a PodDisruptionBudget and a restricted security context. |
+| Status | Relays report **`traced`**: calls recognised by their trace. The extension (1.7.0) shows it and, when nothing is recognised, gives the Datadog, Spring and Quarkus settings that fix it. |
+
+Upgrading needs no code change. A relay 0.6.0 keeps working with an app on 0.7.0, and the other
+way round, without trace attribution.
+
+## What was new in 0.6.0: the backend relay (JCS → TMF → OSB)
 
 The SDK sees the BFF and its calls to JCS. 0.6.0 adds **`apilens-relay`**, a forwarding proxy in
 front of the services JCS calls, so a tester's TMF, OSB and Vesta calls appear under the page that

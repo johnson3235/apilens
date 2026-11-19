@@ -83,11 +83,13 @@ describe('relay diagnosis', () => {
     forwarded: 10, captured: 4, unattributed: 6, mocked: 1, upstreamErrors: 0, dropped: 0, lastSeenAt: Date.now(), ...overrides,
   });
 
-  it('asks for the Spring config when no call through the relay carries a QA session', () => {
+  it('asks for trace or session propagation when no call through the relay is a tester’s', () => {
     const result = diagnoseCapture(status({ relays: [relay({ captured: 0, mocked: 0 })] }), 0)!;
     const check = result.checks.find((item) => item.id === 'relay:jcs-relay')!;
     expect(check.state).toBe('warn');
+    expect(check.fix).toContain('DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext');
     expect(check.fix).toContain('remote-fields: x-qa-session-id');
+    expect(check.fix).toContain('rest.client.propagateHeaders');
     expect(result.headline).toBe(check.title);
   });
 
@@ -96,6 +98,8 @@ describe('relay diagnosis', () => {
     expect(check).toMatchObject({ state: 'ok', title: 'Relay jcs-relay: 4 calls recorded' });
     expect(check.detail).toContain('TMF622, OSB');
     expect(check.detail).toContain('6 from other squads passed through untouched');
+    const traced = diagnoseCapture(status({ relays: [relay({ traced: 4 })] }), 3)!.checks.find((item) => item.id === 'relay:jcs-relay')!;
+    expect(traced.detail).toContain('4 recognised by their trace');
   });
 
   it('warns when the relay lost captures', () => {

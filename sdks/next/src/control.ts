@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { CallBuffer } from './buffer';
 import { sanitizeRule } from './mocks';
+import { traceKey, type TraceOwner } from './trace-registry';
 import type { ControlHealth, ControlPlaneOptions, ServerMockRule } from './types';
 import { CONTROL_PROTOCOL_VERSION } from './types';
 
@@ -21,6 +22,15 @@ export const MIN_TOKEN_LENGTH = 24;
 /** Requests allowed per window before the endpoint starts refusing. */
 const RATE_LIMIT = 600;
 const RATE_WINDOW_MS = 60_000;
+/**
+ * Relays ask "whose trace is this?" on their own budget, so a busy shared
+ * environment can never starve the extension's polling.
+ */
+const ATTRIBUTION_RATE_LIMIT = 3_000;
+/** How far back the rules answer lists traces, for relays to learn testers' traces ahead of their calls. */
+export const RECENT_TRACES_MS = 60_000;
+/** An extension that polled for calls this recently counts as a tester at work, for relays. */
+const TESTER_ACTIVE_MS = 15 * 60_000;
 /** Consecutive auth failures before the endpoint locks out for a cool-down. */
 const MAX_AUTH_FAILURES = 10;
 const LOCKOUT_MS = 60_000;
@@ -53,6 +63,10 @@ export interface ControlContext {
   ingest: (calls: unknown[], relay?: unknown) => number;
   /** Counts rule applications that happened in another process, so apply budgets hold. */
   consume: (ruleIds: string[]) => void;
+  /** The QA session a propagated trace belongs to, for a relay whose backend dropped the session header. */
+  traceOwner?: (traceId: string) => TraceOwner | null;
+  /** Traces propagated recently, sent to relays with the rules. */
+  recentTraces?: () => TraceOwner[];
 }
 
 /** Most calls accepted in one relay request. */
@@ -92,6 +106,8 @@ export function resolveOperation(pathname: string): string {
 export function createControlHandler(context: ControlContext): (request: Request) => Promise<Response> {
   let windowStartedAt = Date.now();
   let windowCount = 0;
+  let attributionCount = 0;
+  let extensionPolledAt = 0;
   let authFailures = 0;
   let lockedUntil = 0;
   const expiresAt = parseExpiry(context.options.expiresAt);
@@ -133,13 +149,16 @@ export function createControlHandler(context: ControlContext): (request: Request
       return reply(request, 404, { error: 'Not found' });
     }
 
+    const url = new URL(request.url);
+    const operation = resolveOperation(url.pathname);
     const now = Date.now();
     if (now - windowStartedAt > RATE_WINDOW_MS) {
       windowStartedAt = now;
       windowCount = 0;
+      attributionCount = 0;
     }
-    windowCount += 1;
-    if (windowCount > RATE_LIMIT) {
+    const overLimit = operation === 'attribution' ? ++attributionCount > ATTRIBUTION_RATE_LIMIT : ++windowCount > RATE_LIMIT;
+    if (overLimit) {
       return reply(request, 429, { error: 'Too many control requests. Slow down the poll interval.' });
     }
 
@@ -158,9 +177,6 @@ export function createControlHandler(context: ControlContext): (request: Request
     }
     authFailures = 0;
 
-    const url = new URL(request.url);
-    const operation = resolveOperation(url.pathname);
-
     try {
       if (operation === 'health' && request.method === 'GET') {
         return reply(request, 200, context.health());
@@ -168,6 +184,7 @@ export function createControlHandler(context: ControlContext): (request: Request
 
       if (operation === 'calls') {
         if (request.method === 'GET') {
+          extensionPolledAt = Date.now();
           // Behind a load balancer each poll may reach a different pod, so the
           // extension sends one cursor per process and each pod reads its own.
           const cursors = url.searchParams.get('cursors');
@@ -198,6 +215,13 @@ export function createControlHandler(context: ControlContext): (request: Request
         return reply(request, 200, { accepted: context.ingest(calls, relay), processId: context.processId });
       }
 
+      if (operation === 'attribution' && request.method === 'GET') {
+        const trace = url.searchParams.get('trace') ?? '';
+        if (!traceKey(trace)) return reply(request, 400, { error: 'Expected trace=<16 or 32 hex>.' });
+        const owner = context.traceOwner?.(trace) ?? null;
+        return reply(request, 200, { processId: context.processId, owner });
+      }
+
       if (operation === 'consume' && request.method === 'POST') {
         const payload: unknown = await request.json().catch(() => null);
         const ruleIds = (payload as { ruleIds?: unknown })?.ruleIds;
@@ -210,10 +234,14 @@ export function createControlHandler(context: ControlContext): (request: Request
 
       if (operation === 'rules') {
         if (request.method === 'GET') {
+          const traces = context.recentTraces?.() ?? [];
           return reply(request, 200, {
             processId: context.processId,
             rules: context.getRules(),
             revision: context.rulesRevision(),
+            traces,
+            // Tells relays someone is testing, so they look up traces even before the first one arrives.
+            testerActive: traces.length > 0 || Date.now() - extensionPolledAt < TESTER_ACTIVE_MS,
           });
         }
         if (request.method === 'PUT' || request.method === 'POST') {

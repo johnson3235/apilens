@@ -17,6 +17,7 @@ const bodies_1 = require("./bodies");
 const incoming_1 = require("./incoming");
 const mocks_1 = require("./mocks");
 const redaction_1 = require("./redaction");
+const trace_registry_1 = require("./trace-registry");
 const version_1 = require("./version");
 const SESSION_HEADER = 'x-qa-session-id';
 const SCENARIO_HEADER = 'x-test-scenario-id';
@@ -24,6 +25,14 @@ const AMBIENT_SESSION_ID = 'apilens-ambient';
 const RELAY_PATH = '/__relay';
 const MAX_BATCH = 50;
 const HARD_REQUEST_CAP = 32 * 1024 * 1024;
+/** Trace lookups only happen this long after the relay last heard of a tester; otherwise there is no one to find. */
+const TESTER_ACTIVE_MS = 15 * 60_000;
+/** A trace the app does not know is not asked about again for this long (learned traces still win). */
+const UNKNOWN_TRACE_MS = 30_000;
+const KNOWN_TRACE_MS = 10 * 60_000;
+const MAX_TRACE_CACHE = 10_000;
+/** Lookups per second, at most; beyond it a request is treated as another squad's. */
+const LOOKUPS_PER_SECOND = 20;
 /** Never forwarded: they describe one connection, not the request (RFC 9110 §7.6.1). */
 const HOP_BY_HOP = new Set([
     'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade',
@@ -65,9 +74,31 @@ function parseB3(single, traceId, spanId) {
         return null;
     return { traceId: trace.padStart(32, '0'), spanId: span };
 }
-/** The caller's trace: W3C first, then B3. */
+const decimalToHex = (value) => {
+    const digits = (value ?? '').trim();
+    if (!/^\d{1,20}$/.test(digits))
+        return null;
+    const number = BigInt(digits);
+    return number > 0n && number < 1n << 64n ? number.toString(16).padStart(16, '0') : null;
+};
+/**
+ * Datadog's own headers, which its tracers send when not configured for W3C:
+ * decimal 64-bit ids, with the trace's upper 64 bits in `_dd.p.tid` when the
+ * tracer generates 128-bit traces.
+ */
+function parseDatadog(traceId, parentId, tags) {
+    const low = decimalToHex(traceId);
+    const span = decimalToHex(parentId);
+    if (!low || !span)
+        return null;
+    const high = /(?:^|,)\s*_dd\.p\.tid=([\da-f]{16})(?:,|$)/i.exec(tags ?? '')?.[1]?.toLowerCase() ?? '0'.repeat(16);
+    return { traceId: `${high}${low}`, spanId: span };
+}
+/** The caller's trace: W3C first, then B3, then Datadog. */
 function traceFromHeaders(req) {
-    return parseTraceparent(header(req, 'traceparent')) ?? parseB3(header(req, 'b3'), header(req, 'x-b3-traceid'), header(req, 'x-b3-spanid'));
+    return parseTraceparent(header(req, 'traceparent'))
+        ?? parseB3(header(req, 'b3'), header(req, 'x-b3-traceid'), header(req, 'x-b3-spanid'))
+        ?? parseDatadog(header(req, 'x-datadog-trace-id'), header(req, 'x-datadog-parent-id'), header(req, 'x-datadog-tags'));
 }
 function normaliseRoutes(routes) {
     const list = Array.isArray(routes) ? routes : Object.entries(routes).map(([name, target]) => ({ name, target }));
@@ -219,7 +250,12 @@ class ApiLensRelay {
     failing = new Map();
     /** Calls whose response is still on its way, so flush() can wait for them. */
     open = new Set();
-    stats = { forwarded: 0, captured: 0, unattributed: 0, mocked: 0, upstreamErrors: 0, dropped: 0 };
+    stats = { forwarded: 0, captured: 0, unattributed: 0, traced: 0, mocked: 0, upstreamErrors: 0, dropped: 0 };
+    /** Trace key → its tester (or null: not a tester's), with when that answer expires. */
+    owners = new Map();
+    lookups = new Map();
+    lookupWindow = { second: 0, count: 0 };
+    testerSeenAt = 0;
     constructor(options) {
         this.options = options;
         this.routes = normaliseRoutes(options.routes);
@@ -304,8 +340,8 @@ class ApiLensRelay {
         target.pathname = `${base.pathname.replace(/\/+$/, '')}${queryAt >= 0 ? rest.slice(0, queryAt) : rest}` || '/';
         target.search = queryAt >= 0 ? rest.slice(queryAt) : '';
         this.stats.forwarded += 1;
-        const session = sessionFromHeaders(req);
-        const attributed = session !== undefined && session !== AMBIENT_SESSION_ID;
+        const identity = await this.identify(req);
+        const attributed = identity.attributed;
         if (!attributed)
             this.stats.unattributed += 1;
         if (!attributed && this.shared) {
@@ -315,7 +351,7 @@ class ApiLensRelay {
         const declared = Number(header(req, 'content-length') ?? '0');
         if (declared > this.maxRequestBytes) {
             // Too large to hold for matching; forwarded as is and recorded without bodies or mocks.
-            this.pipe(req, res, target, this.pending(req, routeName, route.caller, target, session ?? AMBIENT_SESSION_ID, { body: null, omitted: `Not captured: larger than ${this.maxRequestBytes} bytes` }));
+            this.pipe(req, res, target, this.pending(req, routeName, route.caller, target, identity, { body: null, omitted: `Not captured: larger than ${this.maxRequestBytes} bytes` }));
             return;
         }
         let body;
@@ -333,7 +369,7 @@ class ApiLensRelay {
         const requestCapture = this.bodyConfig.request
             ? await captureBuffer(body, header(req, 'content-type') ?? null, header(req, 'content-encoding') ?? null, this.bodyConfig)
             : { body: null, omitted: null };
-        const pending = this.pending(req, routeName, route.caller, target, session ?? AMBIENT_SESSION_ID, requestCapture);
+        const pending = this.pending(req, routeName, route.caller, target, identity, requestCapture);
         let decision = { rule: null, skipped: [] };
         try {
             decision = (0, mocks_1.selectMockRule)(
@@ -354,7 +390,71 @@ class ApiLensRelay {
         }
         this.forward(req, res, target, body, pending, rule);
     }
-    pending(req, route, caller, target, sessionId, request) {
+    /**
+     * The QA session of a request: its own header (or baggage) first; failing
+     * that, the tester whose trace it continues. Never throws or waits longer
+     * than `attributionTimeoutMs`.
+     */
+    async identify(req) {
+        const trace = traceFromHeaders(req);
+        const session = sessionFromHeaders(req);
+        const scenarioId = safeId(header(req, SCENARIO_HEADER)) ?? null;
+        if (session !== undefined && session !== AMBIENT_SESSION_ID) {
+            this.testerSeenAt = Date.now();
+            return { sessionId: session, scenarioId, trace, attributed: true, byTrace: false };
+        }
+        const owner = trace && session === undefined ? await this.ownerOf(trace.traceId) : null;
+        if (owner) {
+            this.stats.traced += 1;
+            // The app's full trace id, so the call nests under the page even when only 64 bits came through.
+            return { sessionId: owner.sessionId, scenarioId: scenarioId ?? owner.scenarioId, trace: { traceId: owner.traceId, spanId: trace.spanId }, attributed: true, byTrace: true };
+        }
+        return { sessionId: AMBIENT_SESSION_ID, scenarioId, trace, attributed: false, byTrace: false };
+    }
+    async ownerOf(traceId) {
+        const key = (0, trace_registry_1.traceKey)(traceId);
+        if (!key)
+            return null;
+        const now = Date.now();
+        const cached = this.owners.get(key);
+        if (cached && cached.until > now)
+            return cached.owner;
+        // No tester around: other squads' traffic never waits on a lookup.
+        if (now - this.testerSeenAt > TESTER_ACTIVE_MS)
+            return null;
+        const inFlight = this.lookups.get(key);
+        if (inFlight)
+            return inFlight;
+        const second = Math.floor(now / 1000);
+        if (this.lookupWindow.second !== second)
+            this.lookupWindow = { second, count: 0 };
+        if (++this.lookupWindow.count > LOOKUPS_PER_SECOND)
+            return null;
+        const lookup = (async () => {
+            const response = await this.control(`attribution?trace=${key}`, { method: 'GET' }, this.options.attributionTimeoutMs ?? 300);
+            const payload = response ? (await response.json().catch(() => null)) : null;
+            const owner = traceOwner(payload?.owner);
+            // A failed lookup is not remembered: the next call of that trace asks again.
+            if (response)
+                this.remember(key, owner);
+            return owner;
+        })().finally(() => this.lookups.delete(key));
+        this.lookups.set(key, lookup);
+        return lookup;
+    }
+    remember(key, owner) {
+        const current = this.owners.get(key);
+        // An answer from another app process that has not seen the trace never hides one that has.
+        if (!owner && current?.owner && current.until > Date.now())
+            return;
+        this.owners.delete(key);
+        this.owners.set(key, { owner, until: Date.now() + (owner ? KNOWN_TRACE_MS : UNKNOWN_TRACE_MS) });
+        if (owner)
+            this.testerSeenAt = Date.now();
+        while (this.owners.size > MAX_TRACE_CACHE)
+            this.owners.delete(this.owners.keys().next().value);
+    }
+    pending(req, route, caller, target, identity, request) {
         let settle = () => undefined;
         const done = new Promise((resolve) => { settle = resolve; });
         this.open.add(done);
@@ -366,9 +466,9 @@ class ApiLensRelay {
             caller: caller ?? this.caller,
             method: (req.method ?? 'GET').toUpperCase(),
             targetUrl: target.toString(),
-            sessionId,
-            scenarioId: safeId(header(req, SCENARIO_HEADER)) ?? null,
-            trace: traceFromHeaders(req),
+            sessionId: identity.sessionId,
+            scenarioId: identity.scenarioId,
+            trace: identity.trace,
             startedAt: Date.now(),
             requestHeaders: nodeRequestHeaders(req),
             request,
@@ -588,6 +688,21 @@ class ApiLensRelay {
     async refreshRules() {
         const response = await this.control('rules', { method: 'GET' });
         const payload = response ? (await response.json().catch(() => null)) : null;
+        if (payload?.testerActive === true)
+            this.testerSeenAt = Date.now();
+        if (Array.isArray(payload?.traces)) {
+            // Testers' traces, learned before their calls arrive, so most need no lookup at all.
+            for (const raw of payload.traces.slice(0, 500)) {
+                const owner = traceOwner(raw);
+                const key = owner && (0, trace_registry_1.traceKey)(owner.traceId);
+                if (key)
+                    this.remember(key, owner);
+            }
+        }
+        if (Array.isArray(payload?.rules) && payload.rules.some((rule) => rule?.match?.sessionId)) {
+            // A tester's mock is waiting: their calls may come at any moment.
+            this.testerSeenAt = Date.now();
+        }
         if (!Array.isArray(payload?.rules))
             return;
         const now = Date.now();
@@ -598,33 +713,46 @@ class ApiLensRelay {
             // A "once" rule this relay just used stays used until the app's count catches up.
             .map((rule) => ({ ...rule, appliedCount: Math.max(rule.appliedCount, local.get(rule.id) ?? 0) }));
     }
-    async control(operation, init) {
+    async control(operation, init, timeoutMs = this.options.control.timeoutMs ?? 5_000) {
+        const name = operation.split('?')[0];
         try {
             const response = await fetch(`${this.controlUrl}/${operation}`, {
                 ...init,
-                signal: AbortSignal.timeout(this.options.control.timeoutMs ?? 5_000),
+                signal: AbortSignal.timeout(timeoutMs),
                 headers: { ...(this.options.control.headers ?? {}), authorization: `Bearer ${this.options.control.token}`, 'content-type': 'application/json' },
             });
             if (!response.ok)
                 throw new Error(`HTTP ${response.status}${response.status === 401 ? ' (APILENS_CONTROL_TOKEN does not match the app)' : ''}`);
-            if (this.failing.delete(operation))
-                this.log(`control plane ${operation}: working again`);
+            if (this.failing.delete(name))
+                this.log(`control plane ${name}: working again`);
             if (!this.failing.size)
                 this.lastControlError = null;
             return response;
         }
         catch (cause) {
-            const message = `${operation}: ${cause instanceof Error ? cause.message : String(cause)}`;
+            const message = `${name}: ${cause instanceof Error ? cause.message : String(cause)}`;
             // Logged when it starts failing or the reason changes, not on every retry.
-            if (this.failing.get(operation) !== message)
+            if (this.failing.get(name) !== message)
                 this.log(`control plane ${message}`);
-            this.failing.set(operation, message);
+            this.failing.set(name, message);
             this.lastControlError = message;
             return null;
         }
     }
 }
 exports.ApiLensRelay = ApiLensRelay;
+/** Validates an owner the app sent; anything malformed counts as unknown. */
+function traceOwner(raw) {
+    if (!raw || typeof raw !== 'object')
+        return null;
+    const value = raw;
+    const traceId = typeof value.traceId === 'string' && /^[\da-f]{32}$/.test(value.traceId) ? value.traceId : null;
+    const sessionId = typeof value.sessionId === 'string' ? safeId(value.sessionId) : undefined;
+    if (!traceId || !sessionId || sessionId === AMBIENT_SESSION_ID)
+        return null;
+    const scenarioId = typeof value.scenarioId === 'string' ? safeId(value.scenarioId) ?? null : null;
+    return { traceId, sessionId, scenarioId, at: typeof value.at === 'number' ? value.at : Date.now() };
+}
 function createRelay(options) {
     return new ApiLensRelay(options);
 }

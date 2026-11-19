@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MAX_RELAY_BATCH = exports.MIN_TOKEN_LENGTH = void 0;
+exports.MAX_RELAY_BATCH = exports.RECENT_TRACES_MS = exports.MIN_TOKEN_LENGTH = void 0;
 exports.isTokenAcceptable = isTokenAcceptable;
 exports.parseExpiry = parseExpiry;
 exports.controlMountPath = controlMountPath;
@@ -11,6 +11,7 @@ exports.buildRulesRevision = buildRulesRevision;
 exports.emptyHealth = emptyHealth;
 const node_crypto_1 = require("node:crypto");
 const mocks_1 = require("./mocks");
+const trace_registry_1 = require("./trace-registry");
 const types_1 = require("./types");
 /**
  * The in-app control plane.
@@ -27,6 +28,15 @@ exports.MIN_TOKEN_LENGTH = 24;
 /** Requests allowed per window before the endpoint starts refusing. */
 const RATE_LIMIT = 600;
 const RATE_WINDOW_MS = 60_000;
+/**
+ * Relays ask "whose trace is this?" on their own budget, so a busy shared
+ * environment can never starve the extension's polling.
+ */
+const ATTRIBUTION_RATE_LIMIT = 3_000;
+/** How far back the rules answer lists traces, for relays to learn testers' traces ahead of their calls. */
+exports.RECENT_TRACES_MS = 60_000;
+/** An extension that polled for calls this recently counts as a tester at work, for relays. */
+const TESTER_ACTIVE_MS = 15 * 60_000;
 /** Consecutive auth failures before the endpoint locks out for a cool-down. */
 const MAX_AUTH_FAILURES = 10;
 const LOCKOUT_MS = 60_000;
@@ -76,6 +86,8 @@ function resolveOperation(pathname) {
 function createControlHandler(context) {
     let windowStartedAt = Date.now();
     let windowCount = 0;
+    let attributionCount = 0;
+    let extensionPolledAt = 0;
     let authFailures = 0;
     let lockedUntil = 0;
     const expiresAt = parseExpiry(context.options.expiresAt);
@@ -112,13 +124,16 @@ function createControlHandler(context) {
             // never advertises that ApiLens is installed.
             return reply(request, 404, { error: 'Not found' });
         }
+        const url = new URL(request.url);
+        const operation = resolveOperation(url.pathname);
         const now = Date.now();
         if (now - windowStartedAt > RATE_WINDOW_MS) {
             windowStartedAt = now;
             windowCount = 0;
+            attributionCount = 0;
         }
-        windowCount += 1;
-        if (windowCount > RATE_LIMIT) {
+        const overLimit = operation === 'attribution' ? ++attributionCount > ATTRIBUTION_RATE_LIMIT : ++windowCount > RATE_LIMIT;
+        if (overLimit) {
             return reply(request, 429, { error: 'Too many control requests. Slow down the poll interval.' });
         }
         if (now < lockedUntil) {
@@ -134,14 +149,13 @@ function createControlHandler(context) {
             return reply(request, 401, { error: 'Invalid or missing ApiLens control token.' });
         }
         authFailures = 0;
-        const url = new URL(request.url);
-        const operation = resolveOperation(url.pathname);
         try {
             if (operation === 'health' && request.method === 'GET') {
                 return reply(request, 200, context.health());
             }
             if (operation === 'calls') {
                 if (request.method === 'GET') {
+                    extensionPolledAt = Date.now();
                     // Behind a load balancer each poll may reach a different pod, so the
                     // extension sends one cursor per process and each pod reads its own.
                     const cursors = url.searchParams.get('cursors');
@@ -170,6 +184,13 @@ function createControlHandler(context) {
                 const relay = payload.relay;
                 return reply(request, 200, { accepted: context.ingest(calls, relay), processId: context.processId });
             }
+            if (operation === 'attribution' && request.method === 'GET') {
+                const trace = url.searchParams.get('trace') ?? '';
+                if (!(0, trace_registry_1.traceKey)(trace))
+                    return reply(request, 400, { error: 'Expected trace=<16 or 32 hex>.' });
+                const owner = context.traceOwner?.(trace) ?? null;
+                return reply(request, 200, { processId: context.processId, owner });
+            }
             if (operation === 'consume' && request.method === 'POST') {
                 const payload = await request.json().catch(() => null);
                 const ruleIds = payload?.ruleIds;
@@ -181,10 +202,14 @@ function createControlHandler(context) {
             }
             if (operation === 'rules') {
                 if (request.method === 'GET') {
+                    const traces = context.recentTraces?.() ?? [];
                     return reply(request, 200, {
                         processId: context.processId,
                         rules: context.getRules(),
                         revision: context.rulesRevision(),
+                        traces,
+                        // Tells relays someone is testing, so they look up traces even before the first one arrives.
+                        testerActive: traces.length > 0 || Date.now() - extensionPolledAt < TESTER_ACTIVE_MS,
                     });
                 }
                 if (request.method === 'PUT' || request.method === 'POST') {

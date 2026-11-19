@@ -1,0 +1,80 @@
+{{- if not .Values.routes }}{{ fail "Set routes: route name → the address the backend calls today" }}{{ end }}
+{{- if not .Values.control.url }}{{ fail "Set control.url to the app's control plane, such as https://clear-dev.example.com/api/__apilens" }}{{ end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "relay.fullname" . }}
+  labels: {{- include "relay.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "relay.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "relay.selector" . | nindent 8 }}
+        {{- with .Values.podLabels }}{{ toYaml . | nindent 8 }}{{ end }}
+      annotations:
+        # Restarts the pods when the routes or settings change.
+        checksum/config: {{ toJson (pick .Values "routes" "callers" "control" "name" "caller" "sharedEnvironment") | sha256sum }}
+        {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{ end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      automountServiceAccountToken: false
+      {{- if not .Values.affinity }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "relay.selector" . | nindent 14 }}
+      {{- end }}
+      containers:
+        - name: relay
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: APILENS_RELAY_NAME, value: {{ .Values.name | quote }} }
+            - { name: APILENS_RELAY_CALLER, value: {{ .Values.caller | quote }} }
+            - { name: APILENS_RELAY_ROUTES, value: {{ include "relay.pairs" .Values.routes | quote }} }
+            {{- if .Values.callers }}
+            - { name: APILENS_RELAY_CALLERS, value: {{ include "relay.pairs" .Values.callers | quote }} }
+            {{- end }}
+            - { name: APILENS_CONTROL_URL, value: {{ .Values.control.url | quote }} }
+            - name: APILENS_CONTROL_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ include "relay.secret" . }}, key: APILENS_CONTROL_TOKEN } }
+            - { name: APILENS_RELAY_SHARED, value: {{ .Values.sharedEnvironment | quote }} }
+            - { name: APILENS_RELAY_ATTRIBUTION_TIMEOUT_MS, value: {{ .Values.attributionTimeoutMs | quote }} }
+            {{- if .Values.redactKeys }}
+            - { name: APILENS_RELAY_REDACT_KEYS, value: {{ join "," .Values.redactKeys | quote }} }
+            {{- end }}
+            {{- with .Values.extraEnv }}{{ toYaml . | nindent 12 }}{{ end }}
+          readinessProbe:
+            httpGet: { path: /__relay/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /__relay/health, port: http }
+            periodSeconds: 15
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.extraVolumeMounts }}
+          volumeMounts: {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.extraVolumes }}
+      volumes: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

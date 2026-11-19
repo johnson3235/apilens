@@ -1,6 +1,6 @@
 {
   "name": "@apilens/next-sdk",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Opt-in Node-runtime and Edge-middleware capture, payload inspection and server mocking for ApiLens, plus a relay for backends such as Spring services",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

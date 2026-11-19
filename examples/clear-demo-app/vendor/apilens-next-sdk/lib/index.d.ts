@@ -69,6 +69,8 @@ export declare class ApiLensNextSDK {
     private servedControl;
     private relayFailures;
     private readonly relays;
+    /** Traces this process passed on for a tester, so a relay further down can tell whose call it sees. */
+    private readonly traces;
     private lastRelayError;
     private readonly auto;
     private requestHook;
@@ -103,6 +105,7 @@ export declare class ApiLensNextSDK {
     /** True when the extension can reach this process over the control plane. */
     get controlEnabled(): boolean;
     health(): ControlHealth;
+    private rememberTrace;
     /** Relays heard from recently, most recent first. */
     private liveRelays;
     /** Calls captured so far, newest last. Useful for assertions in automated tests. */

@@ -1,0 +1,70 @@
+# ApiLens relay. Dev and test environments only, never production.
+# The backend's base URLs point at http://<release name>:8080/<route>/... instead of the real services.
+
+image:
+  repository: ghcr.io/johnson3235/apilens-relay
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Shown in the extension's capture checklist.
+name: apilens-relay
+# The service whose calls pass through, shown on each row.
+caller: backend
+
+# route name → the address the backend calls today. Required.
+routes: {}
+#  tmf678: http://customer-bill-management-fs-quarkus:8080
+#  tmf677: http://query-usage-consumption-fs:8080
+
+# Routes another layer calls, so their calls nest under that layer: { osb: tmf }
+callers: {}
+
+control:
+  # The CLEAR app's control plane, reachable from this namespace. Required.
+  url: ""          # https://clear-dev.example.com/api/__apilens
+  # Name of an existing Secret holding APILENS_CONTROL_TOKEN (recommended: created outside Git).
+  existingSecret: ""
+  # Or the token itself, rendered into a Secret. Never commit it.
+  token: ""
+
+# false records traffic without a QA session too. Only on an environment no one else uses.
+sharedEnvironment: true
+# Extra JSON keys to redact, on top of the built-in list.
+redactKeys: []
+# Longest wait for the app to say whose trace a request is, before passing it through untouched.
+attributionTimeoutMs: 300
+
+# Every call from the backend goes through the relay: keep two, spread apart.
+replicaCount: 2
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+service:
+  port: 8080
+
+resources:
+  requests: { cpu: 50m, memory: 96Mi }
+  limits: { cpu: 500m, memory: 384Mi }
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  seccompProfile: { type: RuntimeDefault }
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }
+
+# Anything else, such as NODE_EXTRA_CA_CERTS for an internal CA.
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
