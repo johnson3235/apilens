@@ -342,7 +342,7 @@ export class ApiLensRelay {
   private readonly failing = new Map<string, string>();
   /** Calls whose response is still on its way, so flush() can wait for them. */
   private readonly open = new Set<Promise<void>>();
-  private readonly stats = { forwarded: 0, captured: 0, unattributed: 0, traced: 0, mocked: 0, upstreamErrors: 0, dropped: 0 };
+  private readonly stats = { forwarded: 0, captured: 0, unattributed: 0, traced: 0, tracedAmbient: 0, mocked: 0, upstreamErrors: 0, dropped: 0 };
   /** Trace key → its tester (or null: not a tester's), with when that answer expires. */
   private readonly owners = new Map<string, { owner: TraceOwner | null; until: number }>();
   private readonly lookups = new Map<string, Promise<TraceOwner | null>>();
@@ -501,9 +501,12 @@ export class ApiLensRelay {
       this.testerSeenAt = Date.now();
       return { sessionId: session, scenarioId, trace, attributed: true, byTrace: false };
     }
-    const owner = trace && session === undefined ? await this.ownerOf(trace.traceId) : null;
+    // An untagged request the app passed on (session "apilens-ambient") is looked up too: since 0.8.0 the
+    // app also remembers those traces, so they are recorded and mocked under the ambient session.
+    const owner = trace ? await this.ownerOf(trace.traceId) : null;
     if (owner) {
       this.stats.traced += 1;
+      if (owner.sessionId === AMBIENT_SESSION_ID) this.stats.tracedAmbient += 1;
       // The app's full trace id, so the call nests under the page even when only 64 bits came through.
       return { sessionId: owner.sessionId, scenarioId: scenarioId ?? owner.scenarioId, trace: { traceId: owner.traceId, spanId: trace!.spanId }, attributed: true, byTrace: true };
     }
@@ -790,7 +793,8 @@ export class ApiLensRelay {
       // Testers' traces, learned before their calls arrive, so most need no lookup at all.
       for (const raw of payload.traces.slice(0, 500)) {
         const owner = traceOwner(raw);
-        const key = owner && traceKey(owner.traceId);
+        // An alias is the trace the backend actually carries (the BFF tracer's), so it is the key.
+        const key = owner && traceKey(owner.alias ?? owner.traceId);
         if (key) this.remember(key, owner);
       }
     }
@@ -837,9 +841,11 @@ function traceOwner(raw: unknown): TraceOwner | null {
   const value = raw as Record<string, unknown>;
   const traceId = typeof value.traceId === 'string' && /^[\da-f]{32}$/.test(value.traceId) ? value.traceId : null;
   const sessionId = typeof value.sessionId === 'string' ? safeId(value.sessionId) : undefined;
-  if (!traceId || !sessionId || sessionId === AMBIENT_SESSION_ID) return null;
+  // The ambient session is accepted (0.8.0+): the app only shares traces it started itself.
+  if (!traceId || !sessionId) return null;
   const scenarioId = typeof value.scenarioId === 'string' ? safeId(value.scenarioId) ?? null : null;
-  return { traceId, sessionId, scenarioId, at: typeof value.at === 'number' ? value.at : Date.now() };
+  const alias = typeof value.alias === 'string' && traceKey(value.alias) ? value.alias.toLowerCase() : undefined;
+  return { traceId, sessionId, scenarioId, at: typeof value.at === 'number' ? value.at : Date.now(), ...(alias ? { alias } : {}) };
 }
 
 export function createRelay(options: RelayOptions): ApiLensRelay {

@@ -18,6 +18,12 @@ export interface TraceOwner {
   sessionId: string;
   scenarioId: string | null;
   at: number;
+  /**
+   * Another trace id the backend may carry instead of `traceId` (0.8.0+): the
+   * Datadog trace the BFF's tracer injected next to ApiLens's `traceparent`.
+   * A relay keys the owner by this when present; `traceId` stays the app's.
+   */
+  alias?: string;
 }
 
 /** The low 64 bits, as 16 lowercase hex, of a 16- or 32-hex trace id; null for anything else. */
@@ -33,12 +39,24 @@ export class TraceRegistry {
 
   constructor(private readonly ttlMs = 10 * 60_000, private readonly max = 5_000) {}
 
-  register(traceId: string, sessionId: string, scenarioId: string | null | undefined): void {
-    const key = traceKey(traceId);
+  /**
+   * Remembers whose trace `traceId` is. With `alias`, the owner is also found
+   * by that other trace id (the backend continued the BFF tracer's trace, not
+   * ApiLens's), and still answers with the app's `traceId`.
+   */
+  register(traceId: string, sessionId: string, scenarioId: string | null | undefined, alias?: string | null): void {
+    this.store(traceId, { traceId: traceId.toLowerCase(), sessionId, scenarioId: scenarioId ?? null, at: Date.now() });
+    if (alias && traceKey(alias) && traceKey(alias) !== traceKey(traceId)) {
+      this.store(alias, { traceId: traceId.toLowerCase(), sessionId, scenarioId: scenarioId ?? null, at: Date.now(), alias: alias.toLowerCase() });
+    }
+  }
+
+  private store(id: string, owner: TraceOwner): void {
+    const key = traceKey(id);
     if (!key) return;
     // Re-inserted so the map stays ordered oldest first.
     this.owners.delete(key);
-    this.owners.set(key, { traceId: traceId.toLowerCase(), sessionId, scenarioId: scenarioId ?? null, at: Date.now() });
+    this.owners.set(key, owner);
     while (this.owners.size > this.max) this.owners.delete(this.owners.keys().next().value as string);
   }
 

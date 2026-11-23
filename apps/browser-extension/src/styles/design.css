@@ -33,6 +33,8 @@
   --mw-soft: rgba(245, 158, 91, 0.13);
   --layer: #f472b6;
   --layer-soft: rgba(244, 114, 182, 0.13);
+  --svc: #7cc4fa;
+  --svc-soft: rgba(124, 196, 250, 0.12);
   --server: var(--cache);
   --rec: #ff4d4f;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 1px 0 rgba(255, 255, 255, 0.03) inset;
@@ -69,6 +71,8 @@
   --mw-soft: rgba(194, 65, 12, 0.09);
   --layer: #be185d;
   --layer-soft: rgba(190, 24, 93, 0.08);
+  --svc: #0369a1;
+  --svc-soft: rgba(3, 105, 161, 0.08);
   --rec: #dc2626;
   --shadow: 0 12px 32px rgba(15, 23, 42, 0.14), 0 1px 2px rgba(15, 23, 42, 0.06);
 }
@@ -155,6 +159,10 @@ button.chip:hover { border-color: var(--border); color: var(--text); }
 .tag.kind-cache { color: var(--cache); background: var(--cache-soft); }
 /* A service behind the ApiLens relay (TMF622, OSB…): named by its route. */
 .tag.kind-layer { color: var(--layer); background: var(--layer-soft); letter-spacing: .02em; }
+/* A backend the BFF called (JCS, FS): named by its service. */
+.tag.kind-service { color: var(--svc); background: var(--svc-soft); font-family: var(--mono); font-weight: 500; letter-spacing: 0; max-width: 34%; overflow: hidden; text-overflow: ellipsis; }
+/* A TMF API, called directly or seen by the relay: TMF678 + its name. */
+.tag.kind-tmf { color: var(--layer); background: var(--layer-soft); font-family: var(--mono); letter-spacing: 0; }
 .tag.mock { color: var(--mock); background: var(--mock-soft); }
 .tag.err { color: var(--err); background: var(--err-soft); }
 .tag.outline { border-color: var(--border); color: var(--muted); background: transparent; }
@@ -309,6 +317,19 @@ button.chip:hover { border-color: var(--border); color: var(--text); }
 .tree-path .host { flex: 0 1 auto; max-width: 30%; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font: 11.5px var(--mono); }
 .tree-path .path-main { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--mono); color: var(--text); }
 .tree-path .summary { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.tree-path .summary.sub { padding: 1px 6px; border-radius: 9px; background: var(--panel-3); color: var(--text-dim); font-size: 10.5px; }
+.tree-path .summary.sub.tmf { background: var(--layer-soft); color: var(--layer); }
+.tree-path .tmf-name { flex: 0 0 auto; color: var(--text-dim); font-size: 11.5px; white-space: nowrap; }
+.tree-path .tmf-name::after { content: '·'; margin-left: 7px; color: var(--border); }
+.tree-path .via { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.tree-path .indent + .twisty { margin-left: -4px; }
+
+/* Layers read at a glance: TMF rows carry a soft tint and a rail, JCS rows a fainter one. */
+.calls .vrow.layer-tmf { background: linear-gradient(90deg, var(--layer-soft), transparent 45%); box-shadow: inset 2px 0 var(--layer); }
+.calls .vrow.child.layer-service { box-shadow: inset 2px 0 var(--svc-soft); }
+.calls .vrow.child.layer-middleware { box-shadow: inset 2px 0 var(--mw-soft); }
+.calls .vrow.layer-tmf.selected, .calls .vrow.selected { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+.calls .vrow.layer-tmf .cell { color: var(--text-dim); }
 
 /* Each row's slice of its page's time: which backend call held the page up. */
 .wf { display: block; position: relative; width: 100%; height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
@@ -318,6 +339,7 @@ button.chip:hover { border-color: var(--border); color: var(--text); }
 .wf i.mock { background: var(--mock); }
 .wf i.cache { background: var(--cache); }
 .wf i.mw { background: var(--mw); }
+.wf i.tmf { background: var(--layer); }
 .wf i.root { background: var(--text-dim); opacity: .5; }
 .dur { font: 12px var(--mono); color: var(--text-dim); }
 .dur.slow { color: var(--warn); }

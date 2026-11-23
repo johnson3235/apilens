@@ -371,10 +371,12 @@ function encloses(outer: ServerCall, inner: ServerCall): boolean {
  * best match; then any other relay hop; then the BFF's own call.
  */
 function parentRank(outer: ServerCall, inner: ServerCall): number {
-  if (!outer.layer) return 1;
   const caller = inner.serviceName.toLowerCase();
+  // The BFF's own call to the very service that made this one (`bill-analysis-js` for its TMF678
+  // call) beats any other BFF call on the page that happens to run at the same time.
+  if (!outer.layer) return serverCallService(outer).toLowerCase() === caller ? 3 : 1;
   if (outer.serviceName.toLowerCase() === caller) return -1;
-  return outer.layer.toLowerCase().startsWith(caller) ? 3 : 2;
+  return outer.layer.toLowerCase().startsWith(caller) ? 4 : 2;
 }
 
 /**
@@ -620,6 +622,58 @@ export function serverCallHost(call: Pick<ServerCall, 'origin'>): string {
   } catch {
     return call.origin;
   }
+}
+
+/**
+ * The service a backend call went to, as people name it: `bill-analysis-js`
+ * for `bill-analysis-js.dxl-dev-ie.svc.cluster.local:8080`. Hosts outside the
+ * cluster keep their full name.
+ */
+export function serverCallService(call: Pick<ServerCall, 'origin'>): string {
+  const host = serverCallHost(call);
+  const name = host.replace(/:\d+$/, '');
+  if (/\.svc(\.|$)/.test(name) || /^[a-z\d-]+$/i.test(name)) return name.split('.')[0]!;
+  return host;
+}
+
+/** TM Forum Open API names, so a relay route reads as what it does. */
+const TMF_NAMES: Record<string, string> = {
+  '620': 'Product Catalog', '621': 'Trouble Ticket', '622': 'Product Ordering', '629': 'Customer', '632': 'Party',
+  '633': 'Service Catalog', '635': 'Usage', '637': 'Product Inventory', '638': 'Service Inventory', '639': 'Resource Inventory',
+  '640': 'Service Activation', '641': 'Service Ordering', '644': 'Privacy', '645': 'Service Qualification', '646': 'Appointment',
+  '648': 'Quote', '651': 'Agreement', '652': 'Resource Ordering', '654': 'Prepay Balance', '663': 'Shopping Cart',
+  '666': 'Account', '667': 'Document', '668': 'Partnership', '669': 'Party Role', '670': 'Payment Method', '673': 'Geographic Address',
+  '674': 'Geographic Site', '676': 'Payment', '677': 'Usage Consumption', '678': 'Customer Bill', '679': 'Offering Qualification',
+  '680': 'Recommendation', '681': 'Communication', '683': 'Party Interaction', '687': 'Stock', '696': 'Risk', '699': 'Sales',
+};
+
+/** API paths the BFF calls directly, mapped to their TMF number. */
+const TMF_PATHS: Array<[RegExp, string]> = [
+  [/\/accountManagement\//i, '666'], [/\/privacyManagement\//i, '644'], [/\/prepayBalanceManagement\//i, '654'],
+  [/\/productOrderingManagement\//i, '622'], [/\/productOrdering\//i, '622'], [/\/documentManagement\//i, '667'],
+  [/\/customerBillManagement\//i, '678'], [/\/productInventory(Management)?\//i, '637'], [/\/shoppingCart\//i, '663'],
+  [/\/troubleTicket\//i, '621'], [/\/paymentManagement\//i, '676'], [/\/usageManagement\//i, '635'],
+];
+
+/** `{ id: 'TMF678', name: 'Customer Bill' }` for a relay route or a direct TMF API call; null otherwise. */
+export function serverCallTmf(call: Pick<ServerCall, 'layer' | 'path' | 'url' | 'kind'>): { id: string; name: string | null } | null {
+  const fromRoute = call.layer ? /^tmf[-_]?(\d{3})$/i.exec(call.layer) : null;
+  const number = fromRoute?.[1] ?? (call.kind === 'client' && !call.layer ? TMF_PATHS.find(([pattern]) => pattern.test(call.path || call.url))?.[1] : undefined);
+  if (number) return { id: `TMF${number}`, name: TMF_NAMES[number] ?? null };
+  if (!call.layer) return null;
+  // Other relay routes (document, osb, vesta…) keep their own name.
+  const named = call.layer.toLowerCase() === 'document' ? 'Document' : null;
+  return { id: call.layer.toUpperCase(), name: named };
+}
+
+/** Which layer of the stack a call belongs to, for colour and filters. */
+export type ServerLayer = 'page' | 'middleware' | 'cache' | 'service' | 'tmf';
+
+export function serverCallLayer(call: Pick<ServerCall, 'kind' | 'stage' | 'cache' | 'layer' | 'path' | 'url'>): ServerLayer {
+  if (call.kind === 'server') return call.stage === 'middleware' ? 'middleware' : 'page';
+  if (call.cache === 'hit') return 'cache';
+  if (call.layer || serverCallTmf(call)) return 'tmf';
+  return 'service';
 }
 
 /** One sentence a non-developer can read: who was called, and how it answered. */

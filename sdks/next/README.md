@@ -1,6 +1,21 @@
-# ApiLens Next SDK 0.6.0 — opt-in QA server tracing, payload capture and server mocking
+# ApiLens Next SDK 0.8.0 — opt-in QA server tracing, payload capture and server mocking
 
 Standalone Node 20+ package. No Next.js runtime dependency, no workspace dependencies, no Express custom server. This is a new adapter; `@apilens/node-sdk` is still the separate legacy Express/http SDK.
+
+## What is new in 0.8.0: every layer without recording
+
+0.7.0 showed a backend's TMF calls only for a tester who was recording. 0.8.0 shows them, and lets
+mocks answer them, for ordinary traffic too, and nests them under the right backend call.
+
+| | 0.8.0 |
+|---|---|
+| Untagged traffic downstream | With `captureWithoutSession` on, the app also remembers the traces of requests without a QA session (`downstreamWithoutSession`, default: same as `captureWithoutSession`). The relay records their TMF calls under `apilens-ambient`, and rules without a `sessionId` answer them. Only traces this app started are recognised, so other squads' traffic through a shared relay is still streamed through untouched. Set `downstreamWithoutSession: false` to keep the 0.7.0 behaviour. |
+| BFF running Datadog | dd-trace injects `x-datadog-*` next to ApiLens's `traceparent`, and a Java agent continues dd-trace's trace. The SDK now also remembers that trace (read from dd-trace's active span), so the relay still finds the request and nests the call under the page. |
+| Relay status | `tracedAmbient`: recognised calls that came from requests without a QA session. |
+| Extension 1.8.0 | Server calls shows each layer in its own colour: page, middleware, the service a backend call went to (`bill-analysis-js`), and TMF calls as `TMF678 Customer Bill`, called directly or through the relay. A TMF call nests under the BFF's call to the JCS that made it, even when other JCS calls run at the same time; any row with calls under it folds; a **TMF** filter shows only that layer. |
+
+Upgrading needs the app and the relay on 0.8.0 together. A 0.7.0 relay ignores untagged traces;
+a 0.7.0 app never sends them.
 
 ## What is new in 0.7.0: no session header needed behind the backend
 

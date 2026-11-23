@@ -93,6 +93,30 @@ interface AutoRequest {
 }
 
 const id = (bytes: number) => randomBytes(bytes).toString('hex');
+
+/**
+ * The trace the app's Datadog tracer (dd-trace, when loaded) is running for
+ * this request, as hex. dd-trace injects its own `x-datadog-*` headers next to
+ * ApiLens's `traceparent`, and a Datadog-instrumented backend (Java agent
+ * defaults) continues that one, so the relay sees Datadog's trace id. Knowing
+ * it lets the relay still find the tester and nest the call under the page.
+ */
+export function activeDatadogTraceId(): string | null {
+  try {
+    const tracer = (globalThis as { _ddtrace?: { scope?: () => { active?: () => { context?: () => unknown } | null } } })._ddtrace;
+    const context = tracer?.scope?.()?.active?.()?.context?.() as { toTraceId?: (full?: boolean) => unknown } | undefined;
+    if (!context || typeof context.toTraceId !== 'function') return null;
+    // dd-trace 4+/5+: the 128-bit id as hex; older: the 64-bit id as decimal.
+    const full = context.toTraceId(true);
+    if (typeof full === 'string' && /^[\da-f]{32}$/i.test(full)) return full.toLowerCase();
+    const low = context.toTraceId();
+    if (typeof low === 'string' && /^\d{1,20}$/.test(low)) return BigInt(low).toString(16).padStart(16, '0');
+  } catch {
+    // Tracing is best-effort; an odd tracer never breaks a request.
+  }
+  return null;
+}
+
 /**
  * Adds the QA session to W3C baggage, which OpenTelemetry-instrumented
  * backends carry on to the services they call, so an ApiLens relay in front
@@ -470,7 +494,9 @@ export class ApiLensNextSDK {
   }
 
   private rememberTrace(ctx: Context): void {
-    if (ctx.sessionId !== AMBIENT_SESSION_ID) this.traces.register(ctx.traceId, ctx.sessionId, ctx.scenarioId);
+    const downstreamAmbient = this.options.downstreamWithoutSession ?? this.options.captureWithoutSession ?? false;
+    if (ctx.sessionId === AMBIENT_SESSION_ID && !downstreamAmbient) return;
+    this.traces.register(ctx.traceId, ctx.sessionId, ctx.scenarioId, activeDatadogTraceId());
   }
 
   /** Relays heard from recently, most recent first. */

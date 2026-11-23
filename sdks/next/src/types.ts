@@ -215,6 +215,8 @@ export interface RelayStatus {
    * backend dropped the session header but continued the tester's trace.
    */
   traced?: number;
+  /** Of `traced`, calls from requests without a QA session (0.8.0+, `downstreamWithoutSession`). */
+  tracedAmbient?: number;
   mocked: number;
   upstreamErrors: number;
   /** Calls the relay could not deliver to this app. */
@@ -356,6 +358,15 @@ export interface NextSDKOptions {
    * set headers, and scoped to `allowedAppOrigins`. Default false.
    */
   captureWithoutSession?: boolean;
+  /**
+   * Let ApiLens relays record and mock the downstream calls (JCS → TMF) of
+   * requests that carry no QA session, the way they do for a tester's own.
+   * Only traces this app started are recognised, so other services' traffic
+   * through a shared relay is still passed through untouched. Mock rules
+   * without a `sessionId` then apply to those calls too. Default: the value
+   * of `captureWithoutSession`.
+   */
+  downstreamWithoutSession?: boolean;
   captureBodies?: BodyCaptureOptions;
   /** Serve the in-app control endpoint the extension talks to. */
   control?: ControlPlaneOptions;

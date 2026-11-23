@@ -32,10 +32,13 @@ async function listen(server: Server): Promise<string> {
 }
 
 /** The app the extension connects to. */
-async function app(propagateToOrigins: string[] = []): Promise<{ base: string; sdk: ApiLensNextSDK }> {
+async function app(
+  propagateToOrigins: string[] = [],
+  extra: Partial<ConstructorParameters<typeof ApiLensNextSDK>[0]> = {},
+): Promise<{ base: string; sdk: ApiLensNextSDK }> {
   const sdk = new ApiLensNextSDK({
     serviceName: 'clear-bff', enabled: true, reportToAgent: false, allowedAppOrigins: ['*'],
-    captureBodies: { request: true, response: true }, control: { enabled: true, token }, propagateToOrigins,
+    captureBodies: { request: true, response: true }, control: { enabled: true, token }, propagateToOrigins, ...extra,
   });
   instances.push(sdk);
   // The app and the relay share this test process; in production they never do. Without this the
@@ -336,11 +339,107 @@ async function quarkusJcs(relayUrl: () => string, style: 'w3c' | 'datadog'): Pro
 const control = (sdk: ApiLensNextSDK, path: string) =>
   sdk.handleControlRequest(new Request(`http://app.test/api/__apilens/${path}`, { headers: { authorization: `Bearer ${token}` } }));
 
-async function bffCall(sdk: ApiLensNextSDK, jcs: string, session = 'qa-sara'): Promise<{ tmfStatus: number }> {
+/** A page request through the BFF; `session: null` is a normal user, not recording. */
+async function bffCall(sdk: ApiLensNextSDK, jcs: string, session: string | null = 'qa-sara'): Promise<{ tmfStatus: number }> {
   const handler = sdk.wrapRoute(async () => fetch(`${jcs}/bill-analysis`));
-  const response = await handler(new Request('http://app.test/api/bills', { headers: { 'x-qa-session-id': session } }), undefined);
+  const response = await handler(new Request('http://app.test/api/bills', { headers: session ? { 'x-qa-session-id': session } : {} }), undefined);
   return response.json();
 }
+
+/**
+ * A Quarkus JCS whose Datadog agent continued the BFF *tracer's* trace
+ * (`ddTrace`), not ApiLens's `traceparent`: what the Java agent does by default
+ * when the BFF runs dd-trace, which injects its own headers next to ours.
+ */
+async function datadogJcs(relayUrl: () => string, ddTrace: string): Promise<string> {
+  return listen(createServer(async (req, res) => {
+    for await (const _ of req) void _;
+    const answer = await send(`${relayUrl()}/tmf678/customerBill?billingAccount=7`, {
+      headers: { traceparent: `00-${ddTrace}-c0ffee00c0ffee00-01`, 'x-datadog-trace-id': BigInt(`0x${ddTrace.slice(16)}`).toString() },
+    });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ tmfStatus: answer.status, tmfBody: answer.body.length }));
+  }));
+}
+
+describe('relay without a recording session (0.8.0)', () => {
+  afterEach(() => { delete (globalThis as { _ddtrace?: unknown })._ddtrace; });
+
+  it('records a normal user’s TMF calls under the ambient session, nested on the BFF trace', async () => {
+    let relayUrl = '';
+    const jcs = await quarkusJcs(() => relayUrl, 'datadog');
+    const { base, sdk } = await app([jcs], { captureWithoutSession: true });
+    const upstream = await tmf({ status: 200, json: { id: 'BILL-1' } });
+    relayUrl = await relay({ tmf678: upstream.base }, base);
+
+    expect(await bffCall(sdk, jcs, null)).toMatchObject({ tmfStatus: 200 });
+
+    const calls = await recorded(sdk);
+    const bff = calls.find((call) => call.url.startsWith(jcs))!;
+    expect(calls.find((call) => call.layer === 'tmf678')).toMatchObject({ sessionId: 'apilens-ambient', traceId: bff.traceId });
+    expect(relayInstance().status()).toMatchObject({ captured: 1, traced: 1, tracedAmbient: 1 });
+  });
+
+  it('answers a normal user’s traced call from a mock with no session, never another squad’s', async () => {
+    let relayUrl = '';
+    const jcs = await quarkusJcs(() => relayUrl, 'w3c');
+    // App, JCS and relay share this test process: keep the app's http hook off the JCS's own calls,
+    // so the relay (not the app) is what answers from the mock.
+    const { base, sdk } = await app([jcs], { captureWithoutSession: true, captureNodeHttp: false });
+    const upstream = await tmf({ status: 200 });
+    relayUrl = await relay({ tmf678: upstream.base }, base);
+    sdk.setServerMockRules([rule({
+      name: 'Bill 500', match: { method: 'GET', urlPattern: '*/customerBill*', matchType: 'glob', kind: 'client' },
+      action: { type: 'status-code', statusCode: 500 },
+    })]);
+    await control(sdk, 'calls?since=0'); // The extension is open.
+    await relayInstance().refreshRules();
+
+    // Another squad's request, on its own trace. Sent first: once the BFF has handled a request, this test
+    // process's own http calls go through the app SDK too (app and relay never share a process for real).
+    const other = await send(`${relayUrl}/tmf678/customerBill`, { headers: { traceparent: `00-${'ab'.repeat(16)}-${PARENT}-01` } });
+    expect(other.status).toBe(200);
+
+    expect(await bffCall(sdk, jcs, null)).toMatchObject({ tmfStatus: 500 });
+    expect(upstream.seen).toHaveLength(1);
+    expect(relayInstance().status()).toMatchObject({ mocked: 1, tracedAmbient: 1 });
+  });
+
+  it('keeps normal users’ downstream calls private with downstreamWithoutSession: false', async () => {
+    let relayUrl = '';
+    const jcs = await quarkusJcs(() => relayUrl, 'w3c');
+    const { base, sdk } = await app([jcs], { captureWithoutSession: true, downstreamWithoutSession: false });
+    const upstream = await tmf({ status: 200 });
+    relayUrl = await relay({ tmf678: upstream.base }, base);
+    await control(sdk, 'calls?since=0');
+    await relayInstance().refreshRules();
+
+    await bffCall(sdk, jcs, null);
+    expect((await recorded(sdk)).filter((call) => call.layer)).toHaveLength(0);
+    expect(upstream.seen).toHaveLength(1);
+  });
+
+  it('follows a backend that continued the BFF’s Datadog trace instead of ours', async () => {
+    const ddTrace = '6650000000000000' + 'd1d2d3d4d5d6d7d8';
+    (globalThis as { _ddtrace?: unknown })._ddtrace = {
+      scope: () => ({ active: () => ({ context: () => ({ toTraceId: (full?: boolean) => (full ? ddTrace : BigInt(`0x${ddTrace.slice(16)}`).toString()) }) }) }),
+    };
+    let relayUrl = '';
+    const jcs = await datadogJcs(() => relayUrl, ddTrace);
+    const { base, sdk } = await app([jcs]);
+    const upstream = await tmf({ status: 200 });
+    relayUrl = await relay({ tmf678: upstream.base }, base);
+    await control(sdk, 'calls?since=0');
+    await relayInstance().refreshRules();
+
+    await bffCall(sdk, jcs, 'qa-sara');
+    const calls = await recorded(sdk);
+    const bff = calls.find((call) => call.url.startsWith(jcs))!;
+    expect(bff.traceId).not.toBe(ddTrace);
+    // Recorded for the tester and put back on the app's own trace, so it nests under the page.
+    expect(calls.find((call) => call.layer === 'tmf678')).toMatchObject({ sessionId: 'qa-sara', traceId: bff.traceId });
+  });
+});
 
 describe('relay behind a backend that drops the session header', () => {
   it.each(['w3c', 'datadog'] as const)('recognises the tester from the trace (%s headers) and nests the call on the BFF trace', async (style) => {

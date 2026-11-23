@@ -1,8 +1,8 @@
 # ApiLens relay: records and mocks the calls a backend (JCS) makes to TMF, OSB, Vesta…
 # A ready image is published with each release: ghcr.io/johnson3235/apilens-relay:<version>.
 # To build it yourself, from the release tarball next to this file:
-#   curl -LO https://github.com/johnson3235/apilens/releases/download/next-sdk-v0.7.0/apilens-next-sdk-0.7.0.tgz
-#   docker build -t apilens-relay:0.7.0 .
+#   curl -LO https://github.com/johnson3235/apilens/releases/download/next-sdk-v0.8.0/apilens-next-sdk-0.8.0.tgz
+#   docker build -t apilens-relay:0.8.0 .
 FROM node:20-alpine
 WORKDIR /relay
 COPY apilens-next-sdk-*.tgz ./

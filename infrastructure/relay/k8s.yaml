@@ -33,7 +33,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: relay
-          image: ghcr.io/johnson3235/apilens-relay:0.7.0
+          image: ghcr.io/johnson3235/apilens-relay:0.8.0
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -7,10 +7,12 @@ import { Icon } from '../components/Icon';
 import {
   groupCallsByRoute,
   relatedServerCalls,
-  serverCallHost,
   serverCallKindClass,
   serverCallKindLabel,
+  serverCallLayer,
   serverCallParent,
+  serverCallService,
+  serverCallTmf,
   serverRuleFromCall,
   type ServerCall,
   type ServerFlowRow,
@@ -19,7 +21,7 @@ import {
 import { diagnoseCapture } from '../../shared/server-diagnosis';
 import type { ServerData } from '../hooks/useServerData';
 
-type KindFilter = 'all' | 'pages' | 'backend';
+type KindFilter = 'all' | 'pages' | 'backend' | 'tmf';
 type Flag = 'failed' | 'slow' | 'mocked' | 'cached';
 
 const SLOW_MS = 1_000;
@@ -50,25 +52,28 @@ function barClass(call: ServerCall, depth: number): string {
   if (call.mockedBy) return 'mock';
   if (call.cache === 'hit') return 'cache';
   if (call.stage === 'middleware') return 'mw';
-  return depth === 0 ? 'root' : 'ok';
+  if (depth === 0) return 'root';
+  return serverCallLayer(call) === 'tmf' ? 'tmf' : 'ok';
 }
 
-/** One line per page: what it took to answer it. */
+/** One line per page (or per backend call with TMF calls under it): what it took to answer it. */
 function pageSummary(children: ServerCall[]): string {
-  const backend = children.filter((call) => call.kind === 'client' && !call.layer && call.cache !== 'hit' && call.stage !== 'middleware').length;
-  // Calls the relay saw a backend make further down (TMF, OSB…).
-  const downstream = children.filter((call) => call.layer).length;
+  const backend = children.filter((call) => serverCallLayer(call) === 'service' && call.stage !== 'middleware').length;
+  // TMF APIs: called by the BFF directly, or seen by the relay further down.
+  const tmf = children.filter((call) => serverCallLayer(call) === 'tmf').length;
   const cached = children.filter((call) => call.cache === 'hit').length;
   const middleware = children.some((call) => call.stage === 'middleware');
   const failed = children.filter((call) => call.status === 'error').length;
   return [
     backend ? `${backend} backend` : null,
-    downstream ? `${downstream} downstream` : null,
+    tmf ? `${tmf} TMF` : null,
     middleware ? 'middleware' : null,
     cached ? `${cached} cached` : null,
     failed ? `${failed} failed` : null,
   ].filter(Boolean).join(' · ');
 }
+
+const KIND_LABELS: Record<KindFilter, string> = { all: 'All', pages: 'Pages', backend: 'Backend', tmf: 'TMF' };
 
 interface Row extends ServerFlowRow {
   /** The page's time window, for the waterfall. */
@@ -139,9 +144,11 @@ export function ServerView({
     const direct = scoped.filter((call) => {
       if (kind === 'pages' && call.kind !== 'server') return false;
       if (kind === 'backend' && call.kind !== 'client') return false;
+      if (kind === 'tmf' && serverCallLayer(call) !== 'tmf') return false;
       for (const flag of flags) if (!matchesFlag(call, flag)) return false;
       if (!needle) return true;
-      return `${call.method} ${call.url} ${call.statusCode ?? ''} ${call.serviceName} ${call.layer ?? ''} ${call.mockedBy ?? ''} ${call.requestBody?.content ?? ''} ${call.responseBody?.content ?? ''}`
+      const tmf = serverCallTmf(call);
+      return `${call.method} ${call.url} ${call.statusCode ?? ''} ${call.serviceName} ${call.layer ?? ''} ${tmf ? `${tmf.id} ${tmf.name ?? ''}` : ''} ${call.mockedBy ?? ''} ${call.requestBody?.content ?? ''} ${call.responseBody?.content ?? ''}`
         .toLowerCase()
         .includes(needle);
     });
@@ -165,24 +172,33 @@ export function ServerView({
 
   const rows = useMemo<Row[]>(() => {
     const flow: ServerFlowRow[] = grouped ? groupCallsByRoute(filtered) : filtered.map((call) => ({ call, depth: 0, childCount: 0, last: false }));
+    // Everything a row caused: the rows after it that sit deeper, up to its next sibling.
+    const subtreeEnd = (at: number): number => {
+      let end = at + 1;
+      while (end < flow.length && flow[end]!.depth > flow[at]!.depth) end += 1;
+      return end;
+    };
     const result: Row[] = [];
     let index = 0;
     while (index < flow.length) {
       const head = flow[index]!;
-      let end = index + 1;
-      while (end < flow.length && flow[end]!.depth > 0) end += 1;
-      const group = flow.slice(index, end);
-      const members = group.map((row) => row.call);
+      const end = subtreeEnd(index);
+      const members = flow.slice(index, end).map((row) => row.call);
       const window = {
         start: Math.min(...members.map((call) => call.startedAt)),
         end: Math.max(...members.map((call) => call.endedAt), head.call.startedAt + 1),
       };
-      const summary = group.length > 1 ? pageSummary(members.slice(1)) : '';
-      const hidden = collapsed.has(head.call.spanId);
-      group.forEach((row, offset) => {
-        if (offset > 0 && hidden) return;
-        result.push({ ...row, window, summary: offset === 0 ? summary : '' });
-      });
+      // Any row can be folded: a page, or a JCS call with the TMF calls under it.
+      let hideDeeperThan = Number.POSITIVE_INFINITY;
+      for (let at = index; at < end; at += 1) {
+        const row = flow[at]!;
+        if (row.depth > hideDeeperThan) continue;
+        hideDeeperThan = Number.POSITIVE_INFINITY;
+        const below = subtreeEnd(at);
+        const summary = below - at > 1 ? pageSummary(flow.slice(at + 1, below).map((child) => child.call)) : '';
+        result.push({ ...row, window, summary });
+        if (collapsed.has(row.call.spanId)) hideDeeperThan = row.depth;
+      }
       index = end;
     }
     return result;
@@ -234,22 +250,32 @@ export function ServerView({
       header: 'Call',
       width: 'auto',
       render: ({ call, depth, childCount }) => {
-        const label = serverCallKindLabel(call);
+        const layer = serverCallLayer(call);
+        const tmf = layer === 'tmf' ? serverCallTmf(call) : null;
+        const folded = collapsed.has(call.spanId);
         return (
           <span className="tree-path">
-            {depth === 0 && childCount > 0 ? (
+            {depth > 0 ? <span className={`indent d${depth}`} aria-hidden="true" /> : null}
+            {childCount > 0 ? (
               <button
                 type="button"
                 className="twisty"
-                aria-expanded={!collapsed.has(call.spanId)}
-                aria-label={collapsed.has(call.spanId) ? 'Show the calls under this page' : 'Hide the calls under this page'}
+                aria-expanded={!folded}
+                aria-label={folded ? 'Show the calls under this one' : 'Hide the calls under this one'}
                 onClick={(event) => { event.stopPropagation(); toggleCollapsed(call.spanId); }}
               ><Icon name="chevron" size={12} /></button>
-            ) : depth === 0 ? <span className="twisty" aria-hidden="true" /> : <span className={`indent d${depth}`} aria-hidden="true" />}
-            <span className={`tag ${serverCallKindClass(call)}`} title={call.layer ? `${call.serviceName} called this through the ApiLens relay` : undefined}>{label}</span>
+            ) : depth === 0 ? <span className="twisty" aria-hidden="true" /> : null}
+            {layer === 'service' ? (
+              <span className="tag kind-service" title={`Backend · ${call.origin}`}>{serverCallService(call)}</span>
+            ) : tmf ? (
+              <span className="tag kind-tmf" title={call.layer ? `${call.serviceName} called this through the ApiLens relay (route ${call.layer})` : `The BFF called this TMF API directly · ${call.origin}`}>{tmf.id}</span>
+            ) : (
+              <span className={`tag ${serverCallKindClass(call)}`}>{serverCallKindLabel(call)}</span>
+            )}
+            {tmf?.name ? <span className="tmf-name">{tmf.name}</span> : null}
             <span className={`method-label ${call.method.toLowerCase()}`}>{call.method}</span>
-            {call.kind === 'client' ? <span className="host" title={call.origin}>{serverCallHost(call)}</span> : null}
             <span className="path-main" title={call.url}>{call.path || call.url}</span>
+            {call.layer && depth === 0 ? <span className="via" title="The call that made it is not in the list">via {call.serviceName}</span> : null}
             {call.mockedBy ? <span className="tag mock" title={`Answered by your mock “${call.mockedBy}”`}>mock</span> : null}
           </span>
         );
@@ -260,7 +286,7 @@ export function ServerView({
       header: '',
       width: '200px',
       className: 'col-summary',
-      render: (row: Row) => (row.depth === 0 && row.summary ? <span className="tree-path"><span className="summary" title={row.summary}>{row.summary}</span></span> : null),
+      render: (row: Row) => (row.summary ? <span className="tree-path"><span className={`summary${row.depth ? ' sub' : ''}${row.depth && row.summary.includes('TMF') ? ' tmf' : ''}`} title={row.summary}>{row.summary}</span></span> : null),
     }]),
     { key: 'status', header: 'Status', width: '64px', render: ({ call }) => <span className={`status-code ${statusClass(call)}`} title={call.error ?? undefined}>{call.statusCode ?? (call.error ? 'ERR' : '—')}</span> },
     ...(compact ? [] : [{
@@ -361,9 +387,9 @@ export function ServerView({
                   <input ref={searchRef} className="input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter by path, status, service or payload text" />
                 </label>
                 <div className="seg" role="group" aria-label="Which calls">
-                  {(['all', 'pages', 'backend'] as KindFilter[]).map((value) => (
-                    <button key={value} aria-pressed={kind === value} onClick={() => setKind(value)}>
-                      {value === 'all' ? 'All' : value === 'pages' ? 'Pages' : 'Backend'}
+                  {(['all', 'pages', 'backend', 'tmf'] as KindFilter[]).map((value) => (
+                    <button key={value} aria-pressed={kind === value} onClick={() => setKind(value)} title={value === 'tmf' ? 'TMF APIs: called by the BFF directly or, through the relay, by a JCS' : undefined}>
+                      {KIND_LABELS[value]}
                     </button>
                   ))}
                 </div>
@@ -388,7 +414,7 @@ export function ServerView({
                     selectedId={draft ? null : selected?.spanId}
                     onSelect={(row) => { setDraft(null); setSelected(row.call); }}
                     getId={(row) => row.call.spanId}
-                    getRowClass={({ call, depth }) => `${depth ? 'child' : 'root'} ${call.status === 'error' ? 'failed' : ''} ${call.mockedBy ? 'mocked' : ''}`}
+                    getRowClass={({ call, depth }) => `${depth ? 'child' : 'root'} layer-${serverCallLayer(call)} ${call.status === 'error' ? 'failed' : ''} ${call.mockedBy ? 'mocked' : ''}`}
                     emptyTitle={connected ? 'No calls match' : 'Waiting for the server'}
                     emptyHint={connected ? 'Clear the search or the filters to see every call.' : 'Polling the control endpoint…'}
                   />

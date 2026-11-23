@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupCallsByRoute, normalizeControlUrl, relatedServerCalls, serverCallKindClass, serverCallKindLabel, serverRuleFromCall, type ServerCall } from './server-control';
+import { groupCallsByRoute, normalizeControlUrl, relatedServerCalls, serverCallKindClass, serverCallKindLabel, serverCallLayer, serverCallService, serverCallTmf, serverRuleFromCall, type ServerCall } from './server-control';
 import { serverCallToSpan } from '../background/server-bridge';
 
 const call: ServerCall = {
@@ -206,5 +206,32 @@ describe('calls seen by the ApiLens relay (BFF → JCS → TMF → OSB)', () => 
     expect(rule.name).toBe('TMF622 POST /productOrder → 503');
     expect(serverRuleFromCall({ ...tmf622, sessionId: 'apilens-ambient' }).match.sessionId).toBeUndefined();
     expect(serverRuleFromCall(jcs).match.sessionId).toBeUndefined();
+  });
+});
+
+describe('layers: a JCS call and the TMF calls it made', () => {
+  const at = (start: number, end: number) => ({ startedAt: start, endedAt: end, durationMs: end - start });
+  const svc = (host: string) => ({ origin: `http://${host}`, url: `http://${host}/x` });
+  const page: ServerCall = { ...call, seq: 1, spanId: 'page', traceId: 'T', kind: 'server', path: '/myaccount/dashboard', ...at(0, 1_000) };
+  // Two JCS calls in parallel; the longer one (records) also spans the TMF call's time window.
+  const balance: ServerCall = { ...call, ...svc('bill-analysis-js.dxl-dev-ie.svc.cluster.local:8080'), seq: 2, spanId: 'balance', traceId: 'T', parentSpanId: 'page', path: '/billAnalysis/v1/balance', ...at(100, 500) };
+  const records: ServerCall = { ...call, ...svc('records-js.dxl-dev-ie.svc.cluster.local:8080'), seq: 3, spanId: 'records', traceId: 'T', parentSpanId: 'page', path: '/journeyCustomerOverview/v1/customer', ...at(120, 900) };
+  const bill: ServerCall = { ...call, seq: 4, spanId: 'tmf678', traceId: 'T', parentSpanId: 'dd-span', serviceName: 'bill-analysis-js', layer: 'tmf678', path: '/customerBill', ...at(150, 400) };
+
+  it('puts a TMF call under the call to the JCS that made it, not a parallel one', () => {
+    const rows = groupCallsByRoute([page, records, balance, bill]);
+    expect(rows.find((row) => row.call.spanId === 'tmf678')).toMatchObject({ depth: 2 });
+    const index = rows.findIndex((row) => row.call.spanId === 'tmf678');
+    expect(rows[index - 1]!.call.spanId).toBe('balance');
+  });
+
+  it('names services and TMF APIs the way people do', () => {
+    expect(serverCallService(balance)).toBe('bill-analysis-js');
+    expect(serverCallService({ origin: 'https://upstream.example.com' })).toBe('upstream.example.com');
+    expect(serverCallTmf(bill)).toEqual({ id: 'TMF678', name: 'Customer Bill' });
+    expect(serverCallTmf({ ...call, path: '/tmf-api/accountManagement/v4/billingAccount' })).toEqual({ id: 'TMF666', name: 'Account' });
+    expect(serverCallTmf({ ...bill, layer: 'osb' })).toEqual({ id: 'OSB', name: null });
+    expect(serverCallTmf(balance)).toBeNull();
+    expect([page, balance, bill].map((value) => serverCallLayer(value))).toEqual(['page', 'service', 'tmf']);
   });
 });
